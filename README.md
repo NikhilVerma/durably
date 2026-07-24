@@ -1,5 +1,7 @@
 # durably
 
+[Website](https://nikhil-verma.com/durably/) · [Documentation](https://nikhil-verma.com/durably/docs/) · [npm](https://www.npmjs.com/package/@nikhilverma/durably)
+
 **Durable workflows for scripts and agents. One process, no server, no setup, no magic.**
 
 Your script makes ten LLM calls. Two fail. The process dies at call seven. Run the same command again: it finishes calls eight through ten — the first seven are never re-executed, never re-billed.
