@@ -1,6 +1,6 @@
 {
   "name": "@nikhilverma/durably",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first durable execution for TypeScript",
   "license": "MIT",
   "author": "Nikhil Verma",
@@ -84,7 +84,7 @@
   },
   "packageManager": "bun@1.3.14",
   "scripts": {
-    "build": "bun build index.ts --target=node --format=esm --outfile=dist/index.js && bun build index.ts --target=node --format=cjs --outfile=dist/index.cjs && bun build test.ts --target=node --format=esm --outfile=dist/test.js && bun build test.ts --target=node --format=cjs --outfile=dist/test.cjs && bun build sqlite.ts --target=node --format=esm --outfile=dist/sqlite.js && bun build sqlite.ts --target=node --format=cjs --outfile=dist/sqlite.cjs && bunx tsc --ignoreConfig index.ts test.ts sqlite.ts --declaration --emitDeclarationOnly --allowImportingTsExtensions --module ESNext --moduleResolution bundler --target ES2022 --types node --skipLibCheck --outDir dist/types && bun scripts/fix-declaration-imports.ts",
+    "build": "bun build index.ts --target=node --format=esm --outfile=dist/index.js && bun build index.ts --target=node --format=cjs --outfile=dist/index.cjs && bun build test.ts --target=node --format=esm --external ./index.ts --outfile=dist/test.js && bun build test.ts --target=node --format=cjs --external ./index.ts --outfile=dist/test.cjs && bun build sqlite.ts --target=node --format=esm --external ./index.ts --outfile=dist/sqlite.js && bun build sqlite.ts --target=node --format=cjs --external ./index.ts --outfile=dist/sqlite.cjs && bunx tsc --ignoreConfig index.ts test.ts sqlite.ts --declaration --emitDeclarationOnly --allowImportingTsExtensions --module ESNext --moduleResolution bundler --target ES2022 --types node --skipLibCheck --outDir dist/types && bun scripts/fix-declaration-imports.ts",
     "audit:package": "bun run build && bun scripts/audit-package.ts",
     "lint:package": "bun run build && publint && bun scripts/run-attw.ts && knip",
     "security:audit": "bun audit",

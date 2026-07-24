@@ -122,7 +122,8 @@ const audit = async (): Promise<void> => {
           ctx.step(() => Promise.resolve(input + 1), { name: "increment" })
         );
         if (await run(wf, 41, { dir }) !== 42) throw new Error("ESM run failed");
-        if (typeof testEngine !== "function") throw new Error("test subpath failed");
+        const tested = await testEngine().run(wf, 41);
+        if (tested.result !== 42) throw new Error("ESM test subpath interoperability failed");
         if (typeof SqliteStorage !== "function") throw new Error("sqlite subpath failed");
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -144,7 +145,8 @@ const audit = async (): Promise<void> => {
             ctx.step(() => Promise.resolve(input + 1), { name: "increment" })
           );
           if (await run(wf, 41, { dir }) !== 42) throw new Error("CJS run failed");
-          if (typeof testEngine !== "function") throw new Error("test subpath failed");
+          const tested = await testEngine().run(wf, 41);
+          if (tested.result !== 42) throw new Error("CJS test subpath interoperability failed");
           if (typeof SqliteStorage !== "function") throw new Error("sqlite subpath failed");
         } finally {
           await rm(dir, { recursive: true, force: true });

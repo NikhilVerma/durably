@@ -1,4 +1,4 @@
-export { testEngine } from "./src/runtime.ts";
+export { testEngine } from "./index.ts";
 
 export type {
   Advisory,

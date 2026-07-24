@@ -21,6 +21,17 @@ const visit = async (directory: string): Promise<void> => {
 
 await visit(root);
 
+for (const [relative, target] of [
+  ["test.js", "./index.js"],
+  ["test.cjs", "./index.cjs"],
+  ["sqlite.js", "./index.js"],
+  ["sqlite.cjs", "./index.cjs"],
+] as const) {
+  const path = join(process.cwd(), "dist", relative);
+  const source = await readFile(path, "utf8");
+  await writeFile(path, source.replaceAll("./index.ts", target));
+}
+
 for (const relative of [
   "index.d.ts",
   "test.d.ts",

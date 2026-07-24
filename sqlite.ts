@@ -1,12 +1,12 @@
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import type {
-  RunClaim,
-  StorageAdapter,
-  StorageListOptions,
-  StoredRun,
+import {
+  FileStorage,
+  type RunClaim,
+  type StorageAdapter,
+  type StorageListOptions,
+  type StoredRun,
 } from "./index.ts";
-import { FileStorage } from "./src/runtime.ts";
 
 interface DatabaseLike {
   exec(sql: string): void;
