@@ -154,7 +154,7 @@ describe("M6 topology: parallel paths and result values", () => {
 });
 
 describe("M6 topology: child workflows", () => {
-  const child = workflow<{ value: number }>(async (ctx, input) =>
+  const child = workflow<{ value: number }>()(async (ctx, input) =>
     ctx.step(() => Promise.resolve(input.value * 2), { name: "child-effect" })
   );
 

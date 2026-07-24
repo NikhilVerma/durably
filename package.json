@@ -1,19 +1,72 @@
 {
-  "name": "durably",
-  "module": "index.ts",
+  "name": "@nikhilverma/durably",
+  "version": "0.1.0",
+  "description": "Local-first durable execution for TypeScript",
+  "license": "MIT",
+  "author": "Nikhil Verma",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NikhilVerma/durably.git"
+  },
+  "homepage": "https://github.com/NikhilVerma/durably#readme",
+  "bugs": {
+    "url": "https://github.com/NikhilVerma/durably/issues"
+  },
+  "keywords": [
+    "durable-execution",
+    "durable-workflows",
+    "workflow",
+    "agents",
+    "typescript",
+    "retries",
+    "local-first"
+  ],
   "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./test": {
+      "types": "./dist/types/test.d.ts",
+      "import": "./dist/test.js",
+      "require": "./dist/test.cjs"
+    },
+    "./sqlite": {
+      "types": "./dist/types/sqlite.d.ts",
+      "import": "./dist/sqlite.js",
+      "require": "./dist/sqlite.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
+    "build": "bun build index.ts --target=node --format=esm --outfile=dist/index.js && bun build index.ts --target=node --format=cjs --outfile=dist/index.cjs && bun build test.ts --target=node --format=esm --outfile=dist/test.js && bun build test.ts --target=node --format=cjs --outfile=dist/test.cjs && bun build sqlite.ts --target=node --format=esm --outfile=dist/sqlite.js && bun build sqlite.ts --target=node --format=cjs --outfile=dist/sqlite.cjs && bunx tsc --ignoreConfig index.ts test.ts sqlite.ts --declaration --emitDeclarationOnly --allowImportingTsExtensions --module ESNext --moduleResolution bundler --target ES2022 --types node --skipLibCheck --outDir dist/types && bun scripts/fix-declaration-imports.ts",
+    "audit:package": "bun run build && bun scripts/audit-package.ts",
+    "prepack": "bun run build",
     "test": "bun test tests/unit tests/integration",
     "test:unit": "bun test tests/unit",
     "test:integration": "bun test tests/integration",
     "test:types": "bunx tsc -p tsconfig.types.json",
-    "test:all": "bun run test:types && bun test tests/unit tests/integration"
+    "test:all": "bun run build && bun run test:types && bun test tests/unit tests/integration"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "gpt-tokenizer": "^3.4.0"
-  },
-  "peerDependencies": {
+    "gpt-tokenizer": "^3.4.0",
     "typescript": "^6"
   }
 }

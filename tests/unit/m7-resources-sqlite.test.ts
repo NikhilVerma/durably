@@ -22,7 +22,7 @@ describe("M7 shared resources", () => {
       resources: [api],
       concurrency: 4,
     });
-    const wf = workflow<{ index: number }>(async (ctx, { index }) =>
+    const wf = workflow<{ index: number }>()(async (ctx, { index }) =>
       ctx.step(async () => {
         active++;
         started++;
@@ -87,7 +87,7 @@ describe("M7 shared resources", () => {
       },
     });
     const engine = createEngine({ storage: new MemoryStorage(), resources: [provider], concurrency: 1 });
-    const failing = workflow<number>(async (ctx) =>
+    const failing = workflow<number>()(async (ctx) =>
       ctx.step(() => {
         providerCalls++;
         if (shouldFail) return Promise.reject(new Error("provider down"));
@@ -124,7 +124,7 @@ describe("M7 shared resources", () => {
       budget: { usd: 1 },
       concurrency: 1,
     });
-    const wf = workflow<number>(async (ctx) => {
+    const wf = workflow<number>()(async (ctx) => {
       ctx.charge({ usd: 0.6 });
       return "charged";
     });
@@ -177,7 +177,7 @@ describe("M7 SqliteStorage adapter", () => {
         breaker: { failureRate: 0.5, windowMs: 1_000, cooldownMs: 10_000 },
       });
       let calls = 0;
-      const wf = workflow<number>(async (ctx) =>
+      const wf = workflow<number>()(async (ctx) =>
         ctx.step(() => {
           calls++;
           throw new Error("down");

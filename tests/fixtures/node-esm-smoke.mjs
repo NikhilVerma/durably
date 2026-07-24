@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { run, workflow } from "durably";
+import { run, workflow } from "@nikhilverma/durably";
 
 const dir = await mkdtemp(join(tmpdir(), "durably-node-esm-"));
 try {

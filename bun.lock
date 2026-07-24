@@ -3,12 +3,10 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "durably",
+      "name": "@nikhilverma/durably",
       "devDependencies": {
         "@types/bun": "latest",
         "gpt-tokenizer": "^3.4.0",
-      },
-      "peerDependencies": {
         "typescript": "^6",
       },
     },

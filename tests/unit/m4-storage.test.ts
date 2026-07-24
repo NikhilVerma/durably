@@ -65,7 +65,7 @@ describe("M4 storage adapter contract", () => {
 
   it("materializes inspectable state.json and events.log for a file-backed run", async () => {
     await withTempDir(async (dir) => {
-      const wf = workflow<{ id: string }>(async (ctx, input) => {
+      const wf = workflow<{ id: string }>()(async (ctx, input) => {
         await ctx.step(() => Promise.resolve({ fetched: input.id }), { name: "fetch" });
         return ctx.waitFor("approval");
       });

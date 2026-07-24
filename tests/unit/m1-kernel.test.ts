@@ -7,7 +7,7 @@ import {
 
 describe("M1 kernel: steps and replay", () => {
   it("returns the workflow result and records the step output", async () => {
-    const wf = workflow<{ value: number }>(async (ctx, input) => {
+    const wf = workflow<{ value: number }>()(async (ctx, input) => {
       const doubled = await ctx.step(() => Promise.resolve(input.value * 2), { name: "double" });
       return doubled + 1;
     });
@@ -232,7 +232,7 @@ describe("M1 kernel: steps and replay", () => {
 
   it("rejects non-serializable workflow input before executing any effects", async () => {
     let calls = 0;
-    const wf = workflow<{ payload: unknown }>(async (ctx) =>
+    const wf = workflow<{ payload: unknown }>()(async (ctx) =>
       ctx.step(() => Promise.resolve(++calls), { name: "must-not-run" })
     );
     await expect(

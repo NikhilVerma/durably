@@ -8,14 +8,14 @@ Each initial code names a concrete cliff and an implemented next move:
 
 | Code | Cliff | Implemented next move | Documentation route |
 | --- | --- | --- | --- |
-| `LOOP_SUGGESTED` | Linear replay cost from loop-shaped positional steps | `ctx.loop` snapshots | `durably.dev/loop` |
-| `FANOUT_CEILING` | Child-run fan-out approaching storage limits | Batch-provider recipe or `SqliteStorage` | `durably.dev/fanout` |
-| `RETRY_STORM` | Repeated same-class failures amplify provider pressure | Named `resource` circuit breaker | `durably.dev/resources` |
-| `STASH_SUGGESTED` | A long interrupted step restarts from zero | `stash` / `stashed` recovery | `durably.dev/stash` |
-| `BUDGET_NEAR` | Intended spend approaches its configured cap | `budget.remaining` or an explicit higher budget | `durably.dev/budgets` |
-| `WAITFOR_NO_TIMEOUT` | A parked run may wait forever | `waitFor(..., { timeoutMs })` | `durably.dev/wait-for` |
-| `SNAPSHOT_HEAVY` | State size times snapshot frequency creates excessive I/O | Compact state or raise `snapshotEvery` | `durably.dev/loop#snapshot-size` |
-| `SLOW_STEP_NO_TIMEOUT` | A slow attempt can hang indefinitely | Step `timeoutMs` with `AbortSignal` handling | `durably.dev/timeouts` |
+| `LOOP_SUGGESTED` | Linear replay cost from loop-shaped positional steps | `ctx.loop` snapshots | `https://www.npmjs.com/package/@nikhilverma/durably#docs-loop` |
+| `FANOUT_CEILING` | Child-run fan-out approaching storage limits | Batch-provider recipe or `SqliteStorage` | `https://www.npmjs.com/package/@nikhilverma/durably#docs-fanout` |
+| `RETRY_STORM` | Repeated same-class failures amplify provider pressure | Named `resource` circuit breaker | `https://www.npmjs.com/package/@nikhilverma/durably#docs-resources` |
+| `STASH_SUGGESTED` | A long interrupted step restarts from zero | `stash` / `stashed` recovery | `https://www.npmjs.com/package/@nikhilverma/durably#docs-stash` |
+| `BUDGET_NEAR` | Intended spend approaches its configured cap | `budget.remaining` or an explicit higher budget | `https://www.npmjs.com/package/@nikhilverma/durably#docs-budgets` |
+| `WAITFOR_NO_TIMEOUT` | A parked run may wait forever | `waitFor(..., { timeoutMs })` | `https://www.npmjs.com/package/@nikhilverma/durably#docs-wait-for` |
+| `SNAPSHOT_HEAVY` | State size times snapshot frequency creates excessive I/O | Compact state or raise `snapshotEvery` | `https://www.npmjs.com/package/@nikhilverma/durably#snapshot-size` |
+| `SLOW_STEP_NO_TIMEOUT` | A slow attempt can hang indefinitely | Step `timeoutMs` with `AbortSignal` handling | `https://www.npmjs.com/package/@nikhilverma/durably#docs-timeouts` |
 
 The active set is capped at ten, warning severity is reserved for stated quantitative ceilings, and stderr emits at most once per code and run.
 
@@ -27,7 +27,15 @@ An `onStart({ runId })` callback remains deferred until a concrete consumer requ
 
 ## 2026-07-24 — `durably` is the canonical identity
 
-The package, public default-engine namespace, error base class, persistence directory, subpaths, documentation routes, and examples use one name consistently: `durably`, `DurablyError`, `.durably/`, and `durably/*`. The checkout directory is not part of the public contract.
+The product, public default-engine namespace, error base class, and persistence directory use `durably`, `DurablyError`, and `.durably/`. The npm package is `@nikhilverma/durably`: the unscoped `durably` name was already owned by another publisher when M8 reached its availability gate. The checkout directory is not part of the public contract.
+
+Until a dedicated documentation domain is deployed, every error and advisory links to an explicit anchor in the public npm README. This keeps the self-correction channel resolvable at release time; a future domain migration must update the route registry, README examples, and this table together.
+
+## 2026-07-24 — M0 preserves inference with currying and completion tokens
+
+TypeScript does not support partial type-argument inference: in `workflow<Input, Output>(fn)`, supplying `Input` forces `Output` to be supplied or defaulted rather than inferred from `fn`. The explicit-input form is therefore `workflow<Input>()(fn)`. `workflow(fn)` still infers both sides when callback parameters carry the input type, and `workflow({ input: schema }, fn)` remains direct.
+
+Likewise, `complete(value): never` erases `value` from the callback's return type, making end-to-end result inference impossible for a workflow that exits through `complete`. The typed contract is `return ctx.complete(value)`, where `complete` produces a branded completion token that `workflow` unwraps to the public result type. The M1 runtime may implement the immediate exit with an internal throw, but the public type remains the branded token so the result is machine-checkable.
 
 ## Internal contract manifests
 

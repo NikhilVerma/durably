@@ -67,7 +67,7 @@ describe("M5 advisories: initial code registry", () => {
   }, 20_000);
 
   it("emits FANOUT_CEILING at 1k children and escalates at 5k", async () => {
-    const child = workflow<number>(async (_ctx, value) => value);
+    const child = workflow<number>()(async (_ctx, value) => value);
     const firstBatch = Array.from({ length: 1_000 }, (_, index) => [child, index] as const);
     const secondBatch = Array.from({ length: 4_000 }, (_, index) => [child, index + 1_000] as const);
     const parent = workflow(async (ctx) => {

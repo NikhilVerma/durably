@@ -65,7 +65,7 @@ describe("file-backed engine cooperation", () => {
     await withTempDir(async (dir) => {
       const gate = deferred<void>();
       let externalCharges = 0;
-      const wf = workflow<{ account: string }>(async (ctx, input) =>
+      const wf = workflow<{ account: string }>()(async (ctx, input) =>
         ctx.step(async () => {
           externalCharges++;
           await gate.promise;
@@ -151,7 +151,7 @@ describe("file-backed engine cooperation", () => {
   it("rejects conflicting keyed inputs across independent engines", async () => {
     await withTempDir(async (dir) => {
       const gate = deferred<void>();
-      const wf = workflow<{ value: number }>(async (ctx, input) =>
+      const wf = workflow<{ value: number }>()(async (ctx, input) =>
         ctx.step(async () => {
           await gate.promise;
           return input.value;

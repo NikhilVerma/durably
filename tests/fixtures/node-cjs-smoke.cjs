@@ -1,7 +1,7 @@
 const { mkdtemp, rm } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
-const { run, workflow } = require("durably");
+const { run, workflow } = require("@nikhilverma/durably");
 
 (async () => {
   const dir = await mkdtemp(join(tmpdir(), "durably-node-cjs-"));

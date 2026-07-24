@@ -92,8 +92,8 @@ describe("M8 README and agent-context release gates", () => {
     try {
       const prelude = join(dir, "prelude.d.ts");
       await writeFile(prelude, `
-        type ExampleWorkflow = import("durably").Workflow<unknown, unknown>;
-        type ExampleSchema = import("durably").StandardSchemaV1<unknown, unknown>;
+        type ExampleWorkflow = import("@nikhilverma/durably").Workflow<unknown, unknown>;
+        type ExampleSchema = import("@nikhilverma/durably").StandardSchemaV1<unknown, unknown>;
         type ToolCall = { name: string; args: Record<string, unknown> };
         type Generated = { text: string; finishReason: string; toolCalls: ToolCall[]; msgs: unknown[] };
         declare const model: unknown, urls: string[], input: unknown, seed: unknown, tools: readonly unknown[];
@@ -116,7 +116,7 @@ describe("M8 README and agent-context release gates", () => {
         declare const ticket: unknown, triage: { kind: "escalate" | "normal" };
         declare const staleRun: { runId: string }, goal: unknown, ResearchInput: ExampleSchema;
         declare const Extraction: ExampleSchema, doc: unknown;
-        declare const openai: ReturnType<typeof import("durably").resource>;
+        declare const openai: ReturnType<typeof import("@nikhilverma/durably").resource>;
         declare function it(name: string, fn: () => Promise<void> | void): void;
         declare function expect(value: unknown): {
           toBe(value: unknown): void; toBeGreaterThan(value: number): void;
@@ -131,7 +131,7 @@ describe("M8 README and agent-context release gates", () => {
         const path = join(dir, `block-${block.index}.ts`);
         const body = /^\s*import\s/m.test(block.source)
           ? block.source
-          : `import { workflow, durably } from "durably";\nconst readmeFragment = workflow(async (ctx) => {\n${block.source}\n});`;
+          : `import { workflow, durably } from "@nikhilverma/durably";\nconst readmeFragment = workflow(async (ctx) => {\n${block.source}\n});`;
         await writeFile(path, `/// <reference path="./prelude.d.ts" />\n${body}\nexport {};\n`);
         files.push(path);
       }
@@ -186,7 +186,7 @@ describe("M8 README and agent-context release gates", () => {
     for (const [code, route] of Object.entries(expectedRoutes)) {
       const row = decisions.split("\n").find((line) => line.includes(`\`${code}\``));
       expect(row).toBeDefined();
-      expect(row).toContain(`durably.dev/${route}`);
+      expect(row).toContain("https://www.npmjs.com/package/@nikhilverma/durably#");
       expect(row!.split("|").filter((cell) => cell.trim()).length).toBeGreaterThanOrEqual(4);
       for (const segment of route.split(/[#/]/)) {
         expect(readmeProof[segment]?.test(readme)).toBe(true);

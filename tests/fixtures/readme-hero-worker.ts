@@ -21,7 +21,7 @@ const waitFor = async (path: string, signal: AbortSignal) => {
   }
 };
 
-const summarize = workflow<{ index: number }>(async (ctx, { index }) => {
+const summarize = workflow<{ index: number }>()(async (ctx, { index }) => {
   const page = await ctx.step(async ({ signal }) => {
     await appendFile(`${dir}/entered-fetch.log`, `${index}\n`);
     await waitFor(`${dir}/release-fetch-${index}`, signal);
@@ -39,7 +39,7 @@ const summarize = workflow<{ index: number }>(async (ctx, { index }) => {
   }, { name: "generateText", retry: { attempts: 3, backoff: "none" } });
 });
 
-const digest = workflow<{ count: number }>(async (ctx, { count }) => {
+const digest = workflow<{ count: number }>()(async (ctx, { count }) => {
   const children = await ctx.spawnAll(
     Array.from({ length: count }, (_, index) => [summarize, { index }] as const),
   );

@@ -22,7 +22,9 @@ describe("M8 actual hint and documentation registries", () => {
     for (const entry of entries) {
       expect(entry.hint.trim().length).toBeGreaterThan(10);
       expect(entry.docs).toBe(docsRoutes[entry.route]);
-      expect(entry.docs).toMatch(/^durably\.dev\//);
+      expect(entry.docs).toMatch(
+        /^https:\/\/www\.npmjs\.com\/package\/@nikhilverma\/durably#/,
+      );
     }
     expect(new Set(Object.keys(advisoryRegistry))).toEqual(new Set([
       "LOOP_SUGGESTED", "FANOUT_CEILING", "RETRY_STORM", "STASH_SUGGESTED",
@@ -32,7 +34,9 @@ describe("M8 actual hint and documentation registries", () => {
 
   it("resolves every route and fragment to a declared documentation anchor", () => {
     for (const [route, url] of Object.entries(docsRoutes)) {
-      expect(url).toBe(`durably.dev/${route}`);
+      expect(url).toMatch(
+        /^https:\/\/www\.npmjs\.com\/package\/@nikhilverma\/durably#[a-z0-9-]+$/,
+      );
       const [page, fragment] = route.split("#");
       expect(publicApiManifest.docsPages).toContain(page);
       if (fragment) expect(publicApiManifest.docsAnchors[page!]).toContain(fragment);

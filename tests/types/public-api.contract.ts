@@ -27,6 +27,7 @@ import {
   type StandardSchemaV1,
   type StorageAdapter,
   type Workflow,
+  type WorkflowCompletion,
 } from "../../index.ts";
 import { SqliteStorage } from "../../sqlite.ts";
 
@@ -39,7 +40,7 @@ type Equal<A, B> =
     : false;
 type Assert<T extends true> = T;
 
-const typed = workflow<{ id: string }>(async (ctx, input) => {
+const typed = workflow<{ id: string }>()(async (ctx, input) => {
   expectType<string>(ctx.runId);
   expectType<number>(ctx.attempt);
   const value = await ctx.step(() => Promise.resolve(input.id.length));
@@ -47,6 +48,9 @@ const typed = workflow<{ id: string }>(async (ctx, input) => {
 });
 
 type _InputIsPreserved = Assert<Equal<typeof typed, Workflow<{ id: string }, { id: string; length: number }>>>;
+
+const fullyInferred = workflow(async (_ctx, input: { value: number }) => input.value * 2);
+expectType<Workflow<{ value: number }, number>>(fullyInferred);
 
 declare const advisory: Advisory;
 expectType<
@@ -118,7 +122,7 @@ const schemaWorkflow = workflow(
 );
 expectType<Promise<User>>(run(schemaWorkflow, { id: "u1", role: "admin" }));
 
-const mixedSteps = workflow<{ enabled: boolean }>(async (ctx, input) => {
+const mixedSteps = workflow<{ enabled: boolean }>()(async (ctx, input) => {
   const text = await ctx.step(async ({ signal, stash, stashed }) => {
     expectType<AbortSignal>(signal);
     expectType<unknown>(stashed);
@@ -143,11 +147,12 @@ const mixedSteps = workflow<{ enabled: boolean }>(async (ctx, input) => {
   expectType<"ok">(text);
 
   const finished = ctx.complete(input.enabled ? 1 : 0);
-  expectType<never>(finished);
+  expectType<WorkflowCompletion<number>>(finished);
+  return finished;
 });
 expectType<Promise<number>>(run(mixedSteps, { enabled: true }));
 
-const loopWorkflow = workflow<{ seed: number }>(async (ctx, input) => {
+const loopWorkflow = workflow<{ seed: number }>()(async (ctx, input) => {
   const final = await ctx.loop(
     { count: input.seed },
     async (state, { step, done }) => {
@@ -163,10 +168,10 @@ const loopWorkflow = workflow<{ seed: number }>(async (ctx, input) => {
 });
 expectType<Promise<{ total: number; exact: true }>>(run(loopWorkflow, { seed: 0 }));
 
-const numberWorkflow = workflow<number>(async (_ctx, value) => value * 2);
-const stringWorkflow = workflow<string>(async (_ctx, value) => value.toUpperCase());
+const numberWorkflow = workflow<number>()(async (_ctx, value) => value * 2);
+const stringWorkflow = workflow<string>()(async (_ctx, value) => value.toUpperCase());
 
-const topology = workflow<{}>(async (ctx) => {
+const topology = workflow<{}>()(async (ctx) => {
   const branches = await ctx.parallel([
     () => ctx.step(() => Promise.resolve(1)),
     () => ctx.step(() => Promise.resolve(2)),
@@ -190,6 +195,9 @@ const topology = workflow<{}>(async (ctx) => {
   const heterogeneousResults = await ctx.joinAll(heterogeneous);
   expectType<readonly [Result<number>, Result<string>]>(heterogeneousResults);
 
+  // @ts-expect-error each child input must match its workflow
+  await ctx.spawnAll([[numberWorkflow, "not-a-number"]] as const);
+
   const okOnly = heterogeneousResults.filter(isOk);
   expectType<Array<{ ok: true; value: number | string }>>(okOnly);
   const [oks, errors] = partition(heterogeneousResults);
@@ -200,7 +208,7 @@ const topology = workflow<{}>(async (ctx) => {
 });
 void topology;
 
-const control = workflow<{}>(async (ctx) => {
+const control = workflow<{}>()(async (ctx) => {
   await ctx.sleep(1_000);
   await ctx.sleepUntil(new Date("2030-01-01T00:00:00Z"));
   const payload = await ctx.waitFor("approval", UserSchema, { timeoutMs: 5_000 });

@@ -16,7 +16,7 @@ const exists = async (path: string): Promise<boolean> => {
   }
 };
 
-const wf = workflow<{ job: string }>(async (ctx, input) => {
+const wf = workflow<{ job: string }>()(async (ctx, input) => {
   await ctx.step(async () => {
     await appendFile(`${dir}/charges.txt`, `${input.job}\n`);
     return "charged";

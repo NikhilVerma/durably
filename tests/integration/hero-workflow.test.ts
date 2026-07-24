@@ -8,7 +8,7 @@ describe("README hero workflow", () => {
     let introCalls = 0;
     const flaky = new Set(["https://b.example", "https://d.example"]);
 
-    const summarize = workflow<{ url: string }>(async (ctx, { url }) => {
+    const summarize = workflow<{ url: string }>()(async (ctx, { url }) => {
       const page = await ctx.step(() => {
         fetchCalls.set(url, (fetchCalls.get(url) ?? 0) + 1);
         return Promise.resolve(`page:${url}`);
@@ -25,7 +25,7 @@ describe("README hero workflow", () => {
       return { url, title: summary.text.slice(0, 24), summary: summary.text };
     });
 
-    const digest = workflow<{ urls: string[] }>(async (ctx, { urls }) => {
+    const digest = workflow<{ urls: string[] }>()(async (ctx, { urls }) => {
       const kids = await ctx.spawnAll(urls.map((url) => [summarize, { url }] as const));
       const results = await ctx.joinAll(kids);
       const ok = results.filter((result) => result.ok).map((result) => result.value);
@@ -59,13 +59,13 @@ describe("README hero workflow", () => {
   });
 
   it("keeps permanently failed children as values and still produces the digest", async () => {
-    const summarize = workflow<{ url: string }>(async (ctx, { url }) =>
+    const summarize = workflow<{ url: string }>()(async (ctx, { url }) =>
       ctx.step(() => {
         if (url.includes("bad")) throw new Error(`cannot fetch ${url}`);
         return Promise.resolve({ url, title: url, summary: `summary:${url}` });
       }, { name: "summarize" })
     );
-    const digest = workflow<{ urls: string[] }>(async (ctx, { urls }) => {
+    const digest = workflow<{ urls: string[] }>()(async (ctx, { urls }) => {
       const kids = await ctx.spawnAll(urls.map((url) => [summarize, { url }] as const));
       const outcomes = await ctx.joinAll(kids);
       const ok = outcomes.filter((outcome) => outcome.ok).map((outcome) => outcome.value);
@@ -90,7 +90,7 @@ describe("README hero workflow", () => {
 describe("whole-workflow durability properties", () => {
   it("produces the same result when killed at every possible boundary", async () => {
     const build = (counts: number[]) =>
-      workflow<{ values: number[] }>(async (ctx, input) => {
+      workflow<{ values: number[] }>()(async (ctx, input) => {
         const output: number[] = [];
         for (const [index, value] of input.values.entries()) {
           output.push(await ctx.step(() => {
@@ -121,7 +121,7 @@ describe("whole-workflow durability properties", () => {
     const inventory = new Set<string>();
     const charges = new Set<string>();
     const events: string[] = [];
-    const checkout = workflow<{ orderId: string }>(async (ctx, input) => {
+    const checkout = workflow<{ orderId: string }>()(async (ctx, input) => {
       await ctx.step(() => {
         inventory.add(input.orderId);
         events.push("hold");

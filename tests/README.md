@@ -1,6 +1,6 @@
 # durably test suite
 
-This is the executable contract built before the library. No test is skipped or marked TODO. Until the M0 public surface exists, runtime files intentionally fail during import and the type contract intentionally reports missing exports.
+This is the executable contract built before the library. No test is skipped or marked TODO. The M0 declarations now satisfy the type contract; runtime files still intentionally fail during import until their implementation milestones land.
 
 ## Layout
 
@@ -33,4 +33,4 @@ bun run test:integration
 bun run test:all
 ```
 
-Tests use `bun:test` and Bun scripts, while workflows and storage/process harnesses use standard JavaScript and `node:*` APIs available on modern Node runtimes. The SQLite adapter is deliberately imported from the separate `sqlite.ts`/future `durably/sqlite` entrypoint so the core import remains usable before Node 22.5.
+Tests use `bun:test` and Bun scripts, while workflows and storage/process harnesses use standard JavaScript and `node:*` APIs available on modern Node runtimes. The SQLite adapter is deliberately imported from the separate `sqlite.ts`/`@nikhilverma/durably/sqlite` entrypoint so the core import remains usable before Node 22.5.

@@ -71,7 +71,7 @@ describe("M5 run(): join, start, and resume identity", () => {
     await withTempDir(async (dir) => {
       const gate = deferred<void>();
       let billedCalls = 0;
-      const wf = workflow<{ prompt: string }>(async (ctx) =>
+      const wf = workflow<{ prompt: string }>()(async (ctx) =>
         ctx.step(async () => {
           billedCalls++;
           await gate.promise;
@@ -172,7 +172,7 @@ describe("M5 run(): join, start, and resume identity", () => {
   it("key replaces input identity but rejects conflicting input reuse", async () => {
     await withTempDir(async (dir) => {
       const gate = deferred<void>();
-      const wf = workflow<{ customer: string }>(async (ctx, input) =>
+      const wf = workflow<{ customer: string }>()(async (ctx, input) =>
         ctx.step(async () => {
           await gate.promise;
           return input.customer;
@@ -193,7 +193,7 @@ describe("M5 run(): join, start, and resume identity", () => {
 describe("M5 engine lifecycle and operations", () => {
   it("enqueue returns a handle immediately and drain runs queued work", async () => {
     const engine = createEngine({ storage: new MemoryStorage(), concurrency: 1 });
-    const wf = workflow<{ id: number }>(async (ctx, input) =>
+    const wf = workflow<{ id: number }>()(async (ctx, input) =>
       ctx.step(() => Promise.resolve(input.id), { name: "work" })
     );
     await engine.start();
@@ -212,7 +212,7 @@ describe("M5 engine lifecycle and operations", () => {
   it("claims higher priority first and FIFO within equal priority", async () => {
     const order: string[] = [];
     const engine = createEngine({ storage: new MemoryStorage(), concurrency: 1 });
-    const wf = workflow<{ id: string }>(async (ctx, input) =>
+    const wf = workflow<{ id: string }>()(async (ctx, input) =>
       ctx.step(() => {
         order.push(input.id);
         return Promise.resolve(input.id);

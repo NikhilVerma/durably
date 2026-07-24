@@ -5,17 +5,17 @@
 Your script makes ten LLM calls. Two fail. The process dies at call seven. Run the same command again: it finishes calls eight through ten — the first seven are never re-executed, never re-billed.
 
 ```bash
-npm install durably        # zero dependencies, zero native addons
+npm install @nikhilverma/durably        # zero dependencies, zero native addons
 ```
 
 ```ts
 // digest.ts
-import { workflow, run } from 'durably'
+import { workflow, run } from '@nikhilverma/durably'
 import { generateText } from 'ai'
 
 type Input = { urls: string[] }
 
-const summarize = workflow<{ url: string }>(async (ctx, { url }) => {
+const summarize = workflow<{ url: string }>()(async (ctx, { url }) => {
   const page = await ctx.step(() => fetch(url).then(r => r.text()), { timeoutMs: 10_000 })
   const s = await ctx.step(
     () => generateText({ model, prompt: `Summarize:\n${page}` }),
@@ -24,7 +24,7 @@ const summarize = workflow<{ url: string }>(async (ctx, { url }) => {
   return { url, title: s.text.slice(0, 60), summary: s.text }
 })
 
-const digest = workflow<Input>(async (ctx, { urls }) => {
+const digest = workflow<Input>()(async (ctx, { urls }) => {
   const kids = await ctx.spawnAll(urls.map(url => [summarize, { url }]))   // each child: own run, own retries
   const results = await ctx.joinAll(kids)                                   // Result[] — failures are values
 
@@ -49,6 +49,8 @@ $ npx tsx digest.ts https://a.example https://b.example  # same command
 ```
 
 `run()` persists to `.durably/` in your working directory, resumes the matching unfinished run if one exists, and returns the result. No engine setup, no config, no schema library.
+
+The extra `()` in `workflow<Input>()(fn)` is deliberate: it lets TypeScript fix the input type and still infer the result type from `fn`. If the callback parameters are already typed, `workflow(fn)` infers both without currying; the Standard Schema form stays `workflow({ input: schema }, fn)`.
 
 **One mental model to hold: on resume, your workflow function re-executes from the top, and completed `ctx.step()` calls return their recorded results instead of re-running.** Effects live inside steps; the code between them must be pure. Everything below is optional depth on that one sentence.
 
@@ -100,6 +102,8 @@ Steps are identified by path but *labeled* automatically from the callback sourc
 
 ### Code changes and staleness
 
+<a id="docs-staleness"></a>
+
 Each run records a hash of **the workflow function's own body** (`fn.toString()`) — deliberately not the transitive import graph. On resume, hash mismatch parks the run as `stale`; nothing ever replays against changed control flow.
 
 Why body-only is the right scope: recorded steps never re-execute, so **code inside step callbacks is free to change**. Completed steps use their recorded results; future and retrying steps run the *new* code — which is exactly what you want (fix a bug mid-run, resume, the fix applies to remaining work). The same freedom Temporal grants activity code. The hash protects the only thing replay depends on: the control-flow skeleton between steps.
@@ -109,6 +113,8 @@ The stated hole: a helper called *between* steps that affects branching can chan
 For a `stale` run: `durably.restart(runId)` starts fresh under new code, or — the dangerous escape hatch — `durably.adopt(runId)` resumes it under the new code with *you* asserting replay compatibility (durably records the assertion in the log). Built for the 72-hour-`waitFor` run you touched a comment near, not for structural edits.
 
 ### `run()` semantics, precisely
+
+<a id="docs-keys"></a>
 
 Identity = `(bodyHash, canonicalInputHash)` — input canonicalization is well-defined because inputs are already restricted to plain JSON data (sorted keys, stable stringify). `{ key }` replaces the input half: `(bodyHash, key)`, scoped per workflow. Then `run()` is join-or-start-or-resume:
 
@@ -130,6 +136,8 @@ The failed→resume row is the one to internalize: a permanently-bad input will 
 
 ### Retries, backoff, timeouts
 
+<a id="docs-timeouts"></a>
+
 Off by default (a failing step fails the run). Policies are plain data:
 
 ```ts
@@ -141,6 +149,8 @@ await ctx.step(({ signal }) => flaky({ signal }), {
 
 ### Validation (optional)
 
+<a id="docs-validation"></a>
+
 Types are inferred; add runtime validation only where you want it — any [Standard Schema](https://github.com/standard-schema/standard-schema) library (Zod, Valibot, ArkType); durably depends on none.
 
 ```ts
@@ -151,6 +161,9 @@ const data = await ctx.step(() => llm.extract(doc), { schema: Extraction })
 ```
 
 ### Fan-out / fan-in
+
+<a id="docs-fanout"></a>
+<a id="docs-cancellation"></a>
 
 ```ts
 // in-run: parallel steps (cheap concurrency; hierarchical positions keep replay exact)
@@ -180,6 +193,8 @@ const held = await ctx.step(() => inventory.hold(sku), {
 
 ### Pause, signals, human-in-the-loop
 
+<a id="docs-wait-for"></a>
+
 ```ts
 const approval = await ctx.waitFor('approval', ApprovalSchema, { timeoutMs: 72 * 3600_000 })
 // run parks as 'waiting' — zero process cost, survives restarts
@@ -205,6 +220,8 @@ if (triage.kind === 'escalate') return { routed: (await ctx.waitFor('decision', 
 ```
 
 ### Budgets
+
+<a id="docs-budgets"></a>
 
 Per-run and engine-wide (the cap an agent fleet actually needs):
 
@@ -244,7 +261,8 @@ durably watches each run for approaching ceilings and missed tools, and surfaces
   { "code": "LOOP_SUGGESTED", "level": "warn",
     "msg": "2,000+ steps in a loop-shaped pattern; replay cost grows linearly",
     "hint": "ctx.loop checkpoints state snapshots — resume becomes O(1)",
-    "docs": "durably.dev/loop", "count": 1, "firstAt": "…" }
+    "docs": "https://www.npmjs.com/package/@nikhilverma/durably#docs-loop",
+    "count": 1, "firstAt": "…" }
 ]
 ```
 
@@ -273,13 +291,14 @@ Each LLM turn is a step; each effectful tool execution is a step; `messages` is 
 
 ### Layer 1 — `ctx.loop`: the durable reducer
 
+<a id="docs-loop"></a>
 <a id="snapshot-size"></a>
 
 At thousands of turns, step-replay has a cost: re-running the loop's pure code N times and holding N outputs. `ctx.loop` checkpoints **state snapshots** instead — resume is O(1) at turn 5,000:
 
 ```ts
 const final = await ctx.loop(
-  { messages: seed, turn: 0 },                             // serializable state
+  { messages: seed as unknown[], turn: 0 },                // serializable state
   async (state, { step, done }) => {
     const res = await step(() => generateText({ model, messages: state.messages, tools }))
     if (res.finishReason === 'stop') return done({ answer: res.text })
@@ -294,14 +313,17 @@ Resume loads the latest snapshot and continues — prior iterations are never re
 
 ### Layer 2 — `stash`: intra-step recovery, your hook
 
+<a id="docs-stash"></a>
+
 For resumability *inside one step* — an interrupted stream, a partial agent turn (the problem Cloudflare's harness solves with recovery data):
 
 ```ts
 await ctx.step(async ({ signal, stash, stashed }) => {
-  let acc = stashed?.text ?? ''                            // progress from a crashed prior attempt
-  for await (const chunk of streamText({ prompt, resumeFrom: stashed?.offset, signal })) {
+  const progress = stashed as { text?: string; offset?: number } | undefined
+  let acc = progress?.text ?? ''                           // progress from a crashed prior attempt
+  for await (const chunk of streamText({ prompt, resumeFrom: progress?.offset, signal })) {
     acc += chunk
-    if (acc.length - (stashed?.offset ?? 0) > 4096) await stash({ text: acc, offset: acc.length })
+    if (acc.length - (progress?.offset ?? 0) > 4096) await stash({ text: acc, offset: acc.length })
   }
   return acc
 })
@@ -338,7 +360,8 @@ $ cat .durably/runs/01J8ZKQ4/state.json
     { "code": "LOOP_SUGGESTED", "level": "warn",
       "msg": "2,000+ steps in a loop-shaped pattern; replay cost grows linearly",
       "hint": "ctx.loop checkpoints state snapshots — resume becomes O(1)",
-      "docs": "durably.dev/loop", "count": 1, "firstAt": "…" }
+      "docs": "https://www.npmjs.com/package/@nikhilverma/durably#docs-loop",
+      "count": 1, "firstAt": "…" }
   ],
   "error": null,
   "children": ["01J8ZKR1", "01J8ZKR2"]
@@ -363,7 +386,7 @@ undetectable outside shadow replay. Editing the workflow fn body makes in-flight
 runs stale; editing step callback internals is safe for future/retrying steps.
 
 DEFINE + RUN
-  const wf = workflow<Input>(async (ctx, input) => result)
+  const wf = workflow<Input>()(async (ctx, input) => result)
   const wf = workflow({ input?, output?, name? }, fn)      // Standard Schema
   await run(wf, input, {key?, fresh?, budget?, dir?, advisories?,
                         onAdvisory?: (a: Advisory)=>void}) -> result
@@ -380,9 +403,9 @@ CTX
   parallel(thunks,{concurrency?}?) -> Result<T>[]
     Result<T> = {ok:true,value:T}|{ok:false,error}
   log(...args) records once and is silent on replay
-  now()/random() are replay-safe; complete(v) ends immediately
+  now()/random() are replay-safe; return ctx.complete(v) exits and infers v
 
-DEFAULT ENGINE  import { durably } from 'durably'          // lazy, ./.durably
+DEFAULT ENGINE  import { durably } from '@nikhilverma/durably' // lazy, ./.durably
   enqueue(wf,input,{key?,priority?,delayMs?,budget?}) -> handle
   inspect(runId) -> state|null; list({status?,workflow?,limit?})
   retry(runId,{fromStep?}); restart(runId); cancel(runId)
@@ -433,7 +456,7 @@ RESOURCES
 
 ENGINES + STORAGE
   createEngine({storage?,resources?,concurrency?,budget?,hooks?})
-  FileStorage(dir); MemoryStorage(); SqliteStorage(path) from durably/sqlite.
+  FileStorage(dir); MemoryStorage(); SqliteStorage(path) from @nikhilverma/durably/sqlite.
   StorageAdapter has init,createRun,append,read,claim,heartbeat,list; append must be
   atomic and ordered per run.
 
@@ -451,7 +474,7 @@ ADVISORIES
 **Shadow replay is on by default:** after every `te.run()` completes, testEngine silently replays the run and asserts an identical step-path sequence with zero new executions. Any control-flow purity violation therefore fails your *existing* tests — you get durability checking without writing durability tests, and the replay rule is machine-verified in minute three instead of discovered in month three. Shadow replay is also why durably ships no lint plugin: the rule is checked in-band, by tests you were writing anyway.
 
 ```ts
-import { testEngine } from 'durably/test'
+import { testEngine } from '@nikhilverma/durably/test'
 
 it('never re-bills an LLM call across a crash', async () => {
   const te = testEngine()
@@ -474,7 +497,8 @@ it('hands stashed progress back after a mid-step crash', async () => {
   const crashed = await te.run(streamTask, input, { crashInStep: 'streamText' })
   const done = await te.resume(crashed.runId)
   expect(done.steps[0].executions).toBe(2)          // step DID re-run —
-  expect(done.result.resumedFromOffset).toBeGreaterThan(0)   // — but from the stash
+  expect((done.result as { resumedFromOffset: number }).resumedFromOffset)
+    .toBeGreaterThan(0)                            // — but from the stash
 })
 ```
 
@@ -484,8 +508,10 @@ it('hands stashed progress back after a mid-step crash', async () => {
 
 ### Long-lived engines
 
+<a id="docs-leases"></a>
+
 ```ts
-import { createEngine, FileStorage } from 'durably'
+import { createEngine, FileStorage } from '@nikhilverma/durably'
 const engine = createEngine({
   storage: new FileStorage('~/.myagent/durably'),
   resources: [openai],                 // shared rate limits + circuit breakers, see below
@@ -497,6 +523,8 @@ await engine.start()
 ```
 
 ### Shared resources
+
+<a id="docs-resources"></a>
 
 Limits that must hold across runs live on named resources: `resource('openai', { rateLimit: { max: 60, perMs: 60_000 }, breaker: { failureRate: 0.5, windowMs: 30_000, cooldownMs: 10_000 }, concurrency: 8 })`, attached via `ctx.step(fn, { uses: 'openai' })`. An open breaker throws retryable `CircuitOpenError` — exponential backoff rides out the cooldown.
 
@@ -512,6 +540,10 @@ Custom backends implement the 7-method event-log `StorageAdapter` (`init, create
 ---
 
 ## Design notes: sharp edges, named deliberately
+
+<a id="docs-errors"></a>
+<a id="docs-serialization"></a>
+<a id="docs-purity"></a>
 
 Every durable-execution library has these; most bury them. durably's contract is that you learn them here, not in month three.
 
