@@ -87,7 +87,7 @@
     "build": "bun build index.ts --target=node --format=esm --outfile=dist/index.js && bun build index.ts --target=node --format=cjs --outfile=dist/index.cjs && bun build test.ts --target=node --format=esm --external ./index.ts --outfile=dist/test.js && bun build test.ts --target=node --format=cjs --external ./index.ts --outfile=dist/test.cjs && bun build sqlite.ts --target=node --format=esm --external ./index.ts --outfile=dist/sqlite.js && bun build sqlite.ts --target=node --format=cjs --external ./index.ts --outfile=dist/sqlite.cjs && bunx tsc --ignoreConfig index.ts test.ts sqlite.ts --declaration --emitDeclarationOnly --allowImportingTsExtensions --module ESNext --moduleResolution bundler --target ES2022 --types node --skipLibCheck --outDir dist/types && bun scripts/fix-declaration-imports.ts",
     "audit:package": "bun run build && bun scripts/audit-package.ts",
     "lint:package": "bun run build && publint && bun scripts/run-attw.ts && knip",
-    "security:audit": "bun audit",
+    "security:audit": "bun scripts/security-audit.ts && npm audit signatures",
     "release:check": "bun run test:all && bun run lint:package && bun run audit:package && bun run security:audit",
     "prepack": "bun run build",
     "prepublishOnly": "bun run release:check",
