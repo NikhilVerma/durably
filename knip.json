@@ -1,0 +1,21 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "index.ts",
+    "test.ts",
+    "sqlite.ts",
+    "scripts/*.ts",
+    "tests/**/*.test.ts",
+    "tests/types/**/*.ts",
+    "tests/fixtures/*.{ts,mjs,cjs}"
+  ],
+  "project": [
+    "*.ts",
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "tests/**/*.{ts,mjs,cjs}"
+  ],
+  "ignoreDependencies": [
+    "@arethetypeswrong/cli"
+  ]
+}

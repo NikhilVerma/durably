@@ -17,5 +17,3 @@ export const docsRoutes = {
   cancellation: `${readme}#docs-cancellation`,
   leases: `${readme}#docs-leases`,
 } as const;
-
-export type DocsRoute = keyof typeof docsRoutes;

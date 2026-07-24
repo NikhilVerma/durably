@@ -19,8 +19,12 @@ const expectedFiles = [
   "dist/test.cjs",
   "dist/test.js",
   "dist/types/index.d.ts",
+  "dist/types/index.d.cts",
   "dist/types/sqlite.d.ts",
+  "dist/types/sqlite.d.cts",
+  "dist/types/src/runtime.d.cts",
   "dist/types/src/runtime.d.ts",
+  "dist/types/test.d.cts",
   "dist/types/test.d.ts",
   "package.json",
 ].sort();

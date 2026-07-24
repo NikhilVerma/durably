@@ -22,6 +22,20 @@ const visit = async (directory: string): Promise<void> => {
 await visit(root);
 
 for (const relative of [
+  "index.d.ts",
+  "test.d.ts",
+  "sqlite.d.ts",
+  "src/runtime.d.ts",
+]) {
+  const path = join(root, relative);
+  const source = await readFile(path, "utf8");
+  await writeFile(
+    path.replace(/\.d\.ts$/, ".d.cts"),
+    source.replace(/(from\s+["'][^"']+)\.js(["'])/g, "$1.cjs$2"),
+  );
+}
+
+for (const relative of [
   "src/advisories.d.ts",
   "src/advisories/registry.d.ts",
   "src/docs/routes.d.ts",

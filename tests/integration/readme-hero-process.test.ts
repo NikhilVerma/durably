@@ -28,19 +28,23 @@ const waitLine = (child: ChildProcessWithoutNullStreams, prefix: string, timeout
       }
     });
   });
-const waitContains = async (
+const waitForDistinctCount = async (
   path: string,
-  values: number[],
+  count: number,
   child?: ChildProcessWithoutNullStreams,
 ) => {
+  const deadline = Date.now() + 5_000;
   for (;;) {
     if (child && (child.exitCode !== null || child.signalCode !== null)) {
-      throw new Error(`hero worker exited before producing ${values.join(",")} in ${path}`);
+      throw new Error(`hero worker exited before producing ${count} distinct values in ${path}`);
     }
     try {
       const found = (await readFile(path, "utf8")).trim().split("\n").filter(Boolean).map(Number);
-      if (values.every((value) => found.includes(value))) return;
+      if (new Set(found).size >= count) return;
     } catch {}
+    if (Date.now() >= deadline) {
+      throw new Error(`timeout waiting for ${count} distinct values in ${path}`);
+    }
     await new Promise((resolve) => setImmediate(resolve));
   }
 };
@@ -55,9 +59,10 @@ describe("literal README hero in real processes", () => {
       const first = start();
       let second: ChildProcessWithoutNullStreams | undefined;
       try {
-        await writeFile(`${dir}/release-fetch-0`, "");
-        await writeFile(`${dir}/release-fetch-1`, "");
-        await waitContains(`${dir}/entered-generate.log`, [0, 1], first);
+        for (let index = 0; index < 4; index++) {
+          await writeFile(`${dir}/release-fetch-${index}`, "");
+        }
+        await waitForDistinctCount(`${dir}/entered-generate.log`, 2, first);
         const stateFiles = await findFilesNamed(dir, "state.json");
         expect(stateFiles.length).toBeGreaterThan(0);
         const states = await Promise.all(stateFiles.map(async (path) =>

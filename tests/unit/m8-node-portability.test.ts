@@ -14,7 +14,10 @@ const targetOf = (entry: unknown, condition: "import" | "require"): string | und
   if (!entry || typeof entry !== "object") return undefined;
   const record = entry as Record<string, unknown>;
   const selected = record[condition] ?? record.default;
-  return typeof selected === "string" ? selected : undefined;
+  if (typeof selected === "string") return selected;
+  if (!selected || typeof selected !== "object") return undefined;
+  const nested = selected as Record<string, unknown>;
+  return typeof nested.default === "string" ? nested.default : undefined;
 };
 
 const exists = async (path: string): Promise<boolean> => {

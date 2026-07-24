@@ -69,7 +69,7 @@ export type StandardSchema<I, O> = {
   };
 };
 
-export const schema = <T>(
+const schema = <T>(
   predicate: (value: unknown) => value is T,
   message = "invalid value",
 ): StandardSchema<unknown, T> => ({
@@ -83,7 +83,7 @@ export const schema = <T>(
   },
 });
 
-export const isRecord = (value: unknown): value is Record<string, unknown> =>
+const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 export const numberSchema = schema<number>(
