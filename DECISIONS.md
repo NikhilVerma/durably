@@ -2,6 +2,16 @@
 
 Append-only governance notes for choices that affect the public contract.
 
+## 2026-07-24 — Execution policy edits preserve durable history
+
+The workflow body hash is a compatibility fast path, not durable identity. When a resumable run has the same workflow family and input/key but a different body hash, durably performs an effect-free structural replay over recorded history. Matching paths, operation kinds, and labels keep the run; the new body hash is pinned before failed or unfinished work continues.
+
+Concurrency, retry/backoff/jitter, future-attempt timeout and keyed-concurrency settings, loop limits, wait timeouts, and future step implementations are operational changes. They apply at the next unfinished boundary without invalidating completed results.
+
+Recorded topology remains protected. Inserted, removed, reordered, or renamed recorded operations; schemas that reject stored output; changed wait identity; and changed compensation for a completed effect produce `StaleRunError`. `restart` and explicit `adopt` remain the recovery choices when automatic compatibility cannot prove the edit.
+
+This decision replaces the earlier assumption that every `fn.toString()` change must become stale. Source equality was stricter than the durable invariant and caused operational tuning to discard useful history.
+
 ## 2026-07-24 — Advisories signpost cliffs, not style
 
 Each initial code names a concrete cliff and an implemented next move:

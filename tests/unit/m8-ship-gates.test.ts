@@ -7,7 +7,9 @@ import { join } from "node:path";
 
 const readmePath = new URL("../../README.md", import.meta.url);
 const decisionsPath = new URL("../../DECISIONS.md", import.meta.url);
+const changelogPath = new URL("../../CHANGELOG.md", import.meta.url);
 const packagePath = new URL("../../package.json", import.meta.url);
+const publishWorkflowPath = new URL("../../.github/workflows/publish.yml", import.meta.url);
 
 const extractFence = (source: string, marker: string): string => {
   const markerAt = source.indexOf(marker);
@@ -213,5 +215,34 @@ describe("M8 README and agent-context release gates", () => {
     }));
     expect(JSON.stringify(pkg.exports?.["."])).not.toMatch(/sqlite/i);
     expect(JSON.stringify(pkg.exports?.["./sqlite"])).toMatch(/sqlite/i);
+  });
+
+  it("ships a maintained changelog with unreleased work separated from releases", async () => {
+    const [changelog, packageSource] = await Promise.all([
+      readFile(changelogPath, "utf8"),
+      readFile(packagePath, "utf8"),
+    ]);
+    const pkg = JSON.parse(packageSource) as { files?: string[]; version: string };
+
+    expect(changelog).toContain("## [Unreleased]");
+    expect(changelog).toContain("structural compatibility replay");
+    expect(changelog).toContain(`## [${pkg.version}] - 2026-07-24`);
+    expect(changelog.indexOf("## [Unreleased]")).toBeLessThan(
+      changelog.indexOf(`## [${pkg.version}]`),
+    );
+    expect(pkg.files).toContain("CHANGELOG.md");
+  });
+
+  it("auto-publishes an unpublished version only after successful main CI", async () => {
+    const workflow = await readFile(publishWorkflowPath, "utf8");
+
+    expect(workflow).toContain("workflow_run:");
+    expect(workflow).toContain('workflows: ["CI"]');
+    expect(workflow).toContain("branches: [main]");
+    expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(workflow).toContain("npm view");
+    expect(workflow).toContain("npm publish --access public");
+    expect(workflow).toContain("id-token: write");
+    expect(workflow).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN|npm_[A-Za-z0-9]+/);
   });
 });

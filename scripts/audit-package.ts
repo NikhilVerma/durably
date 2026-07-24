@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
 const expectedFiles = [
+  "CHANGELOG.md",
   "LICENSE",
   "README.md",
   "dist/index.cjs",

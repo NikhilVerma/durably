@@ -61,12 +61,12 @@ The extra `()` in `workflow<Input>()(fn)` is deliberate: it lets TypeScript fix 
 ## First principles
 
 1. **Built for the script you run, not the service you operate.** The unit of use is an agent script, a CLI tool, a local pipeline — something a person or an AI agent invokes, that should survive interruption, and that finishes. Not a fleet of workers behind a load balancer.
-2. **Sane defaults, everything overridable.** `run()` with zero config is the product. Every default (storage, concurrency, retry-off, lease times) can be overridden, but you should be able to use durably for a month without knowing that.
+2. **Sane defaults, escape hatches when needed.** `run()` with zero config is the normal path. Storage, concurrency, retry behavior, and lease times remain configurable; most scripts should not need those controls at first.
 3. **No magic.** No compiler transforms, no directives, no injected globals. durably's replay model is three sentences, its limits are stated plainly ([Design notes](#design-notes-sharp-edges-named-deliberately)), and what you write is what runs.
 4. **The filesystem is the UI.** Runs are directories. History is grep-able NDJSON. Current state is one `state.json` you can `cat`. An agent debugging a stuck workflow needs file tools, not a dashboard.
-5. **TypeScript is the schema.** Types are inferred end-to-end. Runtime validation is available where data crosses the disk boundary, but opt-in, never an install requirement.
+5. **TypeScript is the schema.** Input and result types flow through the API. Optional runtime validation is available where data crosses the disk boundary without adding a required schema dependency.
 6. **Small enough for a context window.** The complete core spec ([AGENTS block](#for-agents-the-complete-core-api)) stays under 2k tokens — a hard release gate. When a feature competes with that budget, the feature loses or moves to advanced docs.
-7. **Progressive disclosure, signposted cliffs.** You can be productive knowing five things (workflow, run, step, parallel, retry). Everything else stays out of your way until relevant — then introduces itself. Where Temporal lets you discover `continueAsNew` from a workflow's wreckage, durably deletes the cliff where possible (log growth is internal), and where a real ceiling exists, warns you inside the API's own responses before you reach it (see [Advisories](#advisories-the-api-teaches-itself)).
+7. **Progressive disclosure, signposted cliffs.** Five concepts cover the common path: workflow, run, step, parallel, and retry. Log growth stays internal. When a real ceiling remains, an advisory arrives through the API before the run reaches it (see [Advisories](#advisories-the-api-teaches-itself)).
 
 ## Goals
 
@@ -84,7 +84,7 @@ Refusals, not roadmap gaps:
 - **Being a job queue or event bus.** No brokers, no event triggers, no debounce/batching. `signal()` is the escape hatch to the outside world.
 - **Persistent cron.** Durable schedules imply an always-alive daemon — that's an operating system's job. Have cron/launchd invoke your script; durably makes the invocation idempotent and resumable, which is the hard part anyway.
 - **Dashboards and UIs.** `state.json` + `inspect()` + your terminal. Build your own on `list()` if you want one. Same spirit: durably is a **library first** — a `durably-cli` (terminal sugar over `list`/`inspect`/`retry`) may exist as a separate package, but core never requires or assumes it.
-- **Workflow versioning/patching.** A run's *control flow* resumes only under the code that created it (see [Code changes](#code-changes-and-staleness)). This deletes Temporal's entire patching apparatus.
+- **Workflow versioning/patching.** Recorded topology must remain compatible (see [Code changes](#code-changes-and-staleness)). Policy edits and future step implementations resume automatically; incompatible edits become stale without version markers or patch APIs.
 - **An Agent class.** durably ships no model bindings, no message types, no agent loop that owns your architecture. It ships the durability primitives ([Agents on durably](#agents-on-durably)) and recipes; integrations (`durably-contrib/ai-sdk`) live outside core.
 - **Production transaction orchestration at service scale.** Wrong tool. See Temporal, DBOS, Restate.
 
@@ -100,25 +100,31 @@ A workflow function may re-execute from the top many times — after a crash, a 
 
 ### Labels
 
-Steps are identified by path but *labeled* automatically from the callback source (`generateText({ model, pro…`) so logs and state stay readable with zero API. Pass `{ name: 'charge-card' }` for a stable label. Labels are selectors for humans, tests, and `retry({ fromStep })` — never replay identity, so a label collision can at worst select the wrong step in a test (loudly), never match the wrong recorded result (silently). Selector forms: position path (canonical), string (first label match), `{ label, nth }` (precise).
+Steps are identified by path but *labeled* automatically from the callback source (`generateText({ model, pro…`) so logs and state stay readable with zero API. Pass `{ name: 'charge-card' }` for a stable label. Ordinary replay selects recorded results by path. The code-change compatibility check also requires recorded labels to match, so renaming an existing step becomes stale instead of silently retargeting selectors. Selector forms: position path (canonical), string (first label match), `{ label, nth }` (precise).
 
 ### Code changes and staleness
 
 <a id="docs-staleness"></a>
 
-Each run records a hash of **the workflow function's own body** (`fn.toString()`) — deliberately not the transitive import graph. On resume, hash mismatch parks the run as `stale`; nothing ever replays against changed control flow.
+Each run records a hash of **the workflow function's own body** (`fn.toString()`) — deliberately not the transitive import graph. An exact hash resumes immediately. When the body changed, durably performs an effect-free compatibility replay against the recorded history before deciding.
 
-Why body-only is the right scope: recorded steps never re-execute, so **code inside step callbacks is free to change**. Completed steps use their recorded results; future and retrying steps run the *new* code — which is exactly what you want (fix a bug mid-run, resume, the fix applies to remaining work). The same freedom Temporal grants activity code. The hash protects the only thing replay depends on: the control-flow skeleton between steps.
+Compatibility requires every recorded durable operation to appear at the same path, kind, and label. Completed outputs must pass current schemas, and compensation code for completed effects must be unchanged. No effect callback executes during this check.
 
-The stated hole: a helper called *between* steps that affects branching can change behavior under an unchanged hash. That helper already violates the spirit of the purity contract — same rule, same shadow-replay check.
+Execution-policy edits therefore resume automatically: parallel concurrency; retry attempts, backoff, and jitter; future-attempt timeouts and keyed concurrency; loop snapshot/iteration limits; and wait timeouts. Completed steps keep their recorded results. Failed and unfinished work uses the new policy. Code inside failed or future step callbacks may also change.
 
-For a `stale` run: `durably.restart(runId)` starts fresh under new code, or — the dangerous escape hatch — `durably.adopt(runId)` resumes it under the new code with *you* asserting replay compatibility (durably records the assertion in the log). Built for the 72-hour-`waitFor` run you touched a comment near, not for structural edits.
+Inserting, removing, reordering, or renaming recorded operations is incompatible. So are schemas that reject recorded output, changed compensation for a completed effect, and changed wait/signal identity. Those edits park the run as `stale`.
+
+A stable workflow name makes the family unambiguous. For an anonymous `run()` with changed code, durably checks every resumable run with the same input or key and resumes the structurally compatible history. Give workflows stable names when several unrelated scripts share one storage directory; a key replaces input identity inside a family but does not name the family itself.
+
+The stated hole remains: a helper called *between* steps can change branching without changing the workflow function's hash. Same purity rule, same shadow-replay check.
+
+For a genuinely `stale` run: `durably.restart(runId)` starts fresh under new code, or `durably.adopt(runId)` resumes it with *you* asserting compatibility. Automatic compatibility handles policy edits; `adopt` remains the explicit escape hatch for a structural change you have audited.
 
 ### `run()` semantics, precisely
 
 <a id="docs-keys"></a>
 
-Identity = `(bodyHash, canonicalInputHash)` — input canonicalization is well-defined because inputs are already restricted to plain JSON data (sorted keys, stable stringify). `{ key }` replaces the input half: `(bodyHash, key)`, scoped per workflow. Then `run()` is join-or-start-or-resume:
+The candidate identity is the workflow family plus `canonicalInputHash`; `{ key }` replaces the input half within that family. Input canonicalization is well-defined because inputs are plain JSON data (sorted keys, stable stringify). The body hash is the compatibility fast path. A changed body attaches to resumable history only after structural replay succeeds. Then `run()` is join-or-start-or-resume:
 
 | Existing run for this identity | `run()` does |
 | --- | --- |
@@ -268,7 +274,13 @@ durably watches each run for approaching ceilings and missed tools, and surfaces
 ]
 ```
 
-Anti-spam contract (spec, not vibes): deduped by code per run (`count` increments, message never repeats); thresholds emit once per severity crossing (info at 1k steps, warn at 5k), never per-iteration; hard cap 10 active advisories per run; opt-out via `advisories: 'silent'`; level `warn` is reserved for approaching a stated ceiling — style opinions never rank above `info`.
+The advisory channel has fixed spam limits:
+
+- Codes are deduplicated per run. `count` increments without repeating the message.
+- Thresholds emit once per severity crossing (info at 1k steps, warn at 5k), rather than per iteration.
+- Each run keeps at most 10 active advisories.
+- `advisories: 'silent'` disables the channel.
+- Level `warn` is reserved for approaching a stated ceiling. Style opinions stay at `info` or below.
 
 Initial codes: `LOOP_SUGGESTED` · `FANOUT_CEILING` (children nearing storage ceiling → batch-API recipe) · `RETRY_STORM` (same step, same error class, N straight failures → breaker/resource hint) · `STASH_SUGGESTED` (a step re-ran from zero after a crash and its first attempt exceeded 30s) · `BUDGET_NEAR` (80%) · `WAITFOR_NO_TIMEOUT` · `SNAPSHOT_HEAVY` (loop state size × frequency) · `SLOW_STEP_NO_TIMEOUT`.
 
@@ -384,8 +396,9 @@ log BY POSITION PATH. Parallel branches own local counters, so scheduling never
 changes identity. Completed steps return recorded results and never re-execute.
 RULE: effects only inside ctx.step(); between steps use pure code, ctx.now(), and
 ctx.random(). Changed control flow throws PurityError; other purity violations are
-undetectable outside shadow replay. Editing the workflow fn body makes in-flight
-runs stale; editing step callback internals is safe for future/retrying steps.
+undetectable outside shadow replay. A changed workflow body gets effect-free
+compatibility replay: policy edits and future/retrying step code resume; changed
+recorded topology, rejected stored output, or changed compensation becomes stale.
 
 DEFINE + RUN
   const wf = workflow<Input>()(async (ctx, input) => result)
@@ -393,7 +406,8 @@ DEFINE + RUN
   await run(wf, input, {key?, fresh?, budget?, dir?, advisories?,
                         onAdvisory?: (a: Advisory)=>void}) -> result
     Returns your workflow value directly, always; never a metadata wrapper.
-  Identity is (bodyHash,inputHash), or (bodyHash,key):
+  Candidate identity is (workflow,inputHash), or (workflow,key); bodyHash is the
+  compatibility fast path and changed bodies must match recorded durable paths:
     unfinished=>resume · live lease=>subscribe · completed=>fresh run ·
     failed=>resume failed step (fresh:true starts over) · none=>start
 
@@ -547,13 +561,13 @@ Custom backends implement the 7-method event-log `StorageAdapter` (`init, create
 <a id="docs-serialization"></a>
 <a id="docs-purity"></a>
 
-Every durable-execution library has these; most bury them. durably's contract is that you learn them here, not in month three.
+These are the tradeoffs that matter in practice:
 
 1. **Parallel replay identity.** A flat step counter breaks under `parallel`: branches with differing step counts interleave by real completion timing, so replay order ≠ original order → spurious purity errors blaming the user for a scheduler artifact. durably's hierarchical position paths (branch-local counters) exist specifically to kill this bug class. If you write a custom combinator, preserve path scoping.
 2. **The purity rule is only partially enforceable.** Sequence checks catch violations that alter control flow. A side effect between steps that feeds no branch re-executes on every replay, silently, forever — undetectable in principle. Shadow replay in your tests is your real defense.
-3. **Body-hash staleness has a deliberate hole.** Helpers called between steps that affect branching can change behavior under an unchanged hash. Same rule, same shadow-replay check. In exchange: step internals are freely editable mid-run, which is the trade you want.
+3. **Compatibility replay proves recorded history, not arbitrary JavaScript.** A changed body is replayed without effects and must reproduce recorded durable paths. Helpers changed outside the hashed workflow body remain a hole; shadow replay is still the check. New code beyond a failed or unstarted boundary intentionally runs on resume.
 4. **`run()` failed→resume retries permanent failures.** A bad input hits the same wall each invocation until `{ fresh: true }`. The failing step and error are in `state.json`.
-5. **Plain-file durability is hardened, not absolute.** Checksummed records + torn-tail truncation + lockfiles make `FileStorage` solid on local disks and acceptable on Windows; on network filesystems or when you want transactional claims, use `SqliteStorage` — that's why it ships in the box.
+5. **Plain-file durability has limits.** Checksummed records + torn-tail truncation + lockfiles make `FileStorage` solid on local disks and acceptable on Windows. Use `SqliteStorage` on network filesystems or when you want transactional claims.
 6. **`loop` state must be serializable and reasonably small.** Snapshots are the resume path; a 50 MB messages array snapshotted every turn is your I/O bill. Compact your own history (you control the reducer) or raise `snapshotEvery`.
 7. **Fan-out has a ceiling — know where durably taps out.** In-run `parallel` is comfortable to ~10⁴ steps. Child runs: ~10³–10⁴ on `FileStorage` (directory entries, fd churn, `list()` scans become the limit before the model does), ~10⁵ on `SqliteStorage`. Past ~10⁵ items, reach for your provider's Batch API — and that's a recipe, not a defeat: submit the batch as one step, poll with `sleep` + a step in a loop, and durably babysits the batch job instead of impersonating one.
 
@@ -572,9 +586,9 @@ durably invents very little; it picks a point in a well-explored space and says 
 - **[Restate](https://restate.dev) / [Resonate](https://resonatehq.io)** — journal-based replay done rigorously; Resonate's "just functions, durable promises" framing shaped durably's API minimalism.
 - **[Effect](https://effect.website)** — typed errors as values, interruption done properly, `Schedule`-style policy thinking. Ideas borrowed, dependency and API surface declined.
 - **[cockatiel](https://github.com/connor4312/cockatiel) / Polly** — the resilience-policy family: retry, breaker, timeout, bulkhead as one vocabulary.
-- **Gunnar Morling's [Persistasaurus](https://www.morling.dev/blog/building-durable-execution-engine-with-sqlite/)** and the 2025–26 "SQLite is enough" wave — articulated why local-first durable execution deserves to be its own category, not a Temporal consolation prize.
+- **Gunnar Morling's [Persistasaurus](https://www.morling.dev/blog/building-durable-execution-engine-with-sqlite/)** and the 2025–26 "SQLite is enough" wave — articulated the case for local-first durable execution as its own category.
 - **Agent-orchestration DSLs** (Claude Code's internal workflow tool, among others) — the `pipeline`/`parallel` topology decomposition, schema-validated step outputs, and budgets as a first-class primitive.
 
 ## License
 
-MIT
+MIT. Release history is maintained in [CHANGELOG.md](./CHANGELOG.md).

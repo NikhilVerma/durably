@@ -13,6 +13,7 @@ This is the executable contract built before the library. No test is skipped or 
 | `unit/m3-backoff-policy.test.ts` | deterministic jitter bounds and max-delay capping |
 | `unit/m4-storage.test.ts` | seven-method adapter, state materialization, framed records, atomic state, torn-tail recovery |
 | `unit/m5-engine.test.ts` | five-row identity table, keys, lifecycle operations, priority, leases, stale/retry/restart/adopt |
+| `unit/m5-policy-compatibility.test.ts` | policy-only edits, structural compatibility replay, file restart, public `run()`, and incompatible topology/schema/compensation changes |
 | `unit/m5-advisories.test.ts` | all initial codes, thresholds, dedupe, severity, cap, silence, callbacks, stderr, error metadata, attempt timing |
 | `unit/m5-advisory-accumulator.test.ts` | non-vacuous active cap, severity crossings, retry-streak reset and scoping |
 | `unit/m6-topology-agent.test.ts` | hierarchical parallelism, children, cancellation, loop snapshots, waits, timers, stash |

@@ -1,6 +1,6 @@
 {
   "name": "@nikhilverma/durably",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Local-first durable execution for TypeScript",
   "license": "MIT",
   "author": "Nikhil Verma",
@@ -73,6 +73,7 @@
   },
   "files": [
     "dist",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE"
   ],

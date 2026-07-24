@@ -272,6 +272,7 @@ interface WorkflowRuntime<Input = unknown, Output = unknown> extends Workflow<In
   readonly [workflowInternal]: {
     readonly fn: WorkflowFunction<Input, unknown>;
     readonly bodyHash: string;
+    readonly identityName?: string;
     readonly inputSchema?: StandardSchemaV1;
     readonly outputSchema?: StandardSchemaV1;
   };
@@ -286,11 +287,13 @@ const makeWorkflow = <Input, Output>(
   } = {},
 ): Workflow<Input, Output> => {
   const bodyHash = hash(normalizeSource(fn.toString()));
+  const identityName = (options.name ?? fn.name) || undefined;
   const value = {
-    name: options.name ?? (fn.name || `workflow-${bodyHash.slice(0, 10)}`),
+    name: identityName ?? `workflow-${bodyHash.slice(0, 10)}`,
     [workflowInternal]: {
       fn: fn as WorkflowFunction<Input, unknown>,
       bodyHash,
+      identityName,
       inputSchema: options.inputSchema,
       outputSchema: options.outputSchema,
     },
@@ -710,6 +713,7 @@ interface InternalStep {
   compensated?: boolean;
   compensationError?: unknown;
   compensate?: ((output: unknown) => MaybePromise<void>) | undefined;
+  compensationHash?: string | undefined;
 }
 
 interface InternalOp {
@@ -726,6 +730,7 @@ interface InternalLoop {
   snapshotIteration: number;
   snapshots: number;
   done?: boolean;
+  doneIteration?: number;
   output?: unknown;
 }
 
@@ -733,6 +738,7 @@ interface InternalRun {
   runId: string;
   status: RunStatus | "crashed";
   workflow: string;
+  workflowIdentity?: string | undefined;
   bodyHash: string;
   inputHash: string;
   input: unknown;
@@ -787,6 +793,9 @@ interface FailureInjector {
 
 class ParkSignal extends Error {}
 class CrashSignal extends Error {}
+class CompatibilityFrontier extends Error {}
+class CompatibilityNewOperation extends Error {}
+class CompatibilityMismatch extends Error {}
 class CompleteSignal {
   constructor(readonly value: unknown) {}
 }
@@ -798,6 +807,8 @@ interface RuntimeLoopDone {
 }
 
 const pathKey = (path: readonly number[]): string => path.join(".");
+const pathStartsWith = (path: readonly number[], prefix: readonly number[]): boolean =>
+  prefix.length <= path.length && prefix.every((value, index) => path[index] === value);
 const comparePaths = (left: readonly number[], right: readonly number[]): number => {
   for (let index = 0; index < Math.max(left.length, right.length); index++) {
     if (left[index] === undefined) return -1;
@@ -813,6 +824,9 @@ const autoLabel = (fn: Function): string => {
     .replace(/^function\s*[^(]*\([^)]*\)\s*\{?/, "");
   return source.slice(0, 80) || "step";
 };
+
+const functionHash = (fn: Function | undefined): string | undefined =>
+  fn ? hash(normalizeSource(fn.toString())) : undefined;
 
 const asError = (error: unknown): Error =>
   error instanceof Error ? error : new Error(typeof error === "string" ? error : String(error));
@@ -847,6 +861,9 @@ const publicStep = (step: InternalStep): Record<string, unknown> => ({
   ...(step.startedAt ? { startedAt: step.startedAt } : {}),
   ...(step.ms !== undefined ? { ms: step.ms } : {}),
   ...(step.stashed !== undefined ? { stashed: step.stashed } : {}),
+  ...(step.compensationHash !== undefined
+    ? { compensationHash: step.compensationHash }
+    : {}),
   attemptHistory: step.attemptHistory.map((attempt) => ({ ...attempt })),
 });
 
@@ -881,6 +898,7 @@ const stateOf = (run: InternalRun): RunState & Record<string, unknown> => ({
       }]),
   ),
   __internal: {
+    workflowIdentity: run.workflowIdentity,
     ops: run.ops,
     loops: run.loops,
     seq: run.seq,
@@ -906,6 +924,9 @@ const hydrateRun = (stateValue: RunState & Record<string, unknown>): InternalRun
         startedAt: typeof step.startedAt === "string" ? step.startedAt : undefined,
         ms: typeof step.ms === "number" ? step.ms : undefined,
         stashed: step.stashed,
+        compensationHash: typeof step.compensationHash === "string"
+          ? step.compensationHash
+          : undefined,
         attemptHistory: Array.isArray(step.attemptHistory)
           ? step.attemptHistory as unknown as AttemptRecord[]
           : [],
@@ -915,6 +936,11 @@ const hydrateRun = (stateValue: RunState & Record<string, unknown>): InternalRun
     runId: state.runId,
     status: state.status,
     workflow: state.workflow,
+    workflowIdentity: typeof internal.workflowIdentity === "string"
+      ? internal.workflowIdentity
+      : /^workflow-[0-9a-f]{10}$/.test(state.workflow)
+        ? undefined
+        : state.workflow,
     bodyHash: String(state.bodyHash ?? ""),
     inputHash: String(state.inputHash ?? ""),
     input: state.input,
@@ -1215,6 +1241,7 @@ class EngineImpl implements Engine {
       runId,
       status: "pending",
       workflow: definition.name ?? "workflow",
+      workflowIdentity: definition[workflowInternal].identityName,
       bodyHash: definition[workflowInternal].bodyHash,
       inputHash: hash(stableStringify(input)),
       input,
@@ -1259,6 +1286,349 @@ class EngineImpl implements Engine {
     return status === "waiting" || status === "sleeping" || status === "paused";
   }
 
+  private async isStructurallyCompatible(
+    run: InternalRun,
+    definition: WorkflowRuntime<any, any>,
+  ): Promise<boolean> {
+    const engine = this;
+    const visitedSteps = new Set<string>();
+    const visitedOps = new Set<string>();
+    const visitedLoops = new Set<string>();
+    const visitedChildren = new Set<string>();
+    const commitPolicyUpdates: Array<() => void> = [];
+
+    const mismatch = (message: string): never => {
+      throw new CompatibilityMismatch(message);
+    };
+    const step = async (
+      _fn: Function,
+      options: {
+        name?: string;
+        schema?: StandardSchemaV1;
+        compensate?: (output: unknown) => MaybePromise<void>;
+      } = {},
+    ): Promise<unknown> => {
+      const path = engine.allocatePath();
+      const key = pathKey(path);
+      const label = options.name ?? autoLabel(_fn);
+      const record = run.steps.find((candidate) => pathKey(candidate.path) === key);
+      if (!record) {
+        throw new CompatibilityNewOperation(`step ${key} was inserted before the recorded frontier`);
+      }
+      if (record.label !== label) {
+        return mismatch(`step ${key} does not match recorded history`);
+      }
+      visitedSteps.add(key);
+      if (record.status === "ok") {
+        const recordedCompensation = record.compensationHash ?? functionHash(record.compensate);
+        if (recordedCompensation !== functionHash(options.compensate)) {
+          return mismatch(`compensation for step ${key} changed after completion`);
+        }
+        try {
+          return options.schema
+            ? await schemaValidate(options.schema, record.output)
+            : record.output;
+        } catch {
+          return mismatch(`schema for step ${key} rejects its recorded output`);
+        }
+      }
+      throw new CompatibilityFrontier(`step ${key} has no completed output`);
+    };
+
+    const childAt = async (
+      path: number[],
+      childDefinition: WorkflowRuntime<any, any>,
+      index: number,
+      detached: boolean,
+    ): Promise<RunHandle<unknown>> => {
+      const childId = `${run.runId}:${path.join(":")}:${index}`;
+      const child = engine.runs.get(childId);
+      if (!child || !run.children.includes(childId)) {
+        throw new CompatibilityNewOperation(`child ${childId} was inserted before the recorded frontier`);
+      }
+      if (
+        child.workflowIdentity !== childDefinition[workflowInternal].identityName
+      ) {
+        return mismatch(`child ${childId} changed workflow identity`);
+      }
+      if (run.detachedChildren.includes(childId) !== detached) {
+        return mismatch(`child ${childId} changed detached policy`);
+      }
+      if (child.bodyHash !== childDefinition[workflowInternal].bodyHash) {
+        return mismatch(`child ${childId} changed durable topology`);
+      }
+      visitedChildren.add(childId);
+      return { runId: childId } as RunHandle<unknown>;
+    };
+    const compatibilitySleep = async (): Promise<void> => {
+      const path = engine.allocatePath();
+      const key = pathKey(path);
+      const operation = run.ops[key];
+      if (!operation || operation.kind !== "sleep") {
+        return mismatch(`sleep ${key} does not match recorded history`);
+      }
+      visitedOps.add(key);
+      if ((operation.wakeAt ?? Number.POSITIVE_INFINITY) > engine.clock.now()) {
+        throw new CompatibilityFrontier(`sleep ${key} is unresolved`);
+      }
+    };
+
+    const context = {
+      runId: run.runId,
+      attempt: run.workflowAttempt,
+      budget: {
+        remaining: (kind: BudgetKind): number => {
+          const limit = run.budgetLimit[kind];
+          return limit === undefined ? Number.POSITIVE_INFINITY : limit - (run.budgetSpent[kind] ?? 0);
+        },
+        spent: (kind: BudgetKind): number => run.budgetSpent[kind] ?? 0,
+      },
+      step,
+      async parallel(
+        thunks: readonly (() => MaybePromise<unknown>)[],
+      ): Promise<Result<unknown>[]> {
+        const operationPath = engine.allocatePath();
+        return Promise.all(thunks.map(async (thunk, index) => {
+          try {
+            const value = await engine.pathStorage.run(
+              { prefix: [...operationPath, index], counter: 0 },
+              thunk,
+            );
+            return { ok: true, value } as Result<unknown>;
+          } catch (error) {
+            if (error instanceof CompatibilityMismatch) throw error;
+            if (error instanceof CompatibilityNewOperation) {
+              throw new CompatibilityMismatch(error.message);
+            }
+            if (error instanceof CompatibilityFrontier) {
+              return {
+                ok: false,
+                error: { name: "CompatibilityFrontier", message: error.message },
+              } as Result<unknown>;
+            }
+            return { ok: false, error: errorValue(error) } as Result<unknown>;
+          }
+        }));
+      },
+      async spawn(
+        childDefinition: WorkflowRuntime<any, any>,
+        _input: unknown,
+        options: { detached?: boolean } = {},
+      ): Promise<RunHandle<unknown>> {
+        const path = engine.allocatePath();
+        return childAt(path, childDefinition, 0, options.detached ?? false);
+      },
+      async spawnAll(
+        definitions: readonly (readonly [WorkflowRuntime<any, any>, unknown])[],
+        options: { detached?: boolean } = {},
+      ): Promise<RunHandle<unknown>[]> {
+        const path = engine.allocatePath();
+        return Promise.all(definitions.map(([childDefinition], index) =>
+          childAt(path, childDefinition, index, options.detached ?? false)
+        ));
+      },
+      async joinAll(handles: readonly RunHandle<unknown>[]): Promise<Result<unknown>[]> {
+        return handles.map((handle) => {
+          const child = engine.runs.get(handle.runId);
+          if (!child || !engine.isTerminal(child.status)) {
+            throw new CompatibilityFrontier(`child ${handle.runId} is unfinished`);
+          }
+          return child.status === "completed"
+            ? { ok: true, value: child.result }
+            : { ok: false, error: errorValue(child.error) };
+        });
+      },
+      async loop(
+        initialState: unknown,
+        reducer: (
+          state: unknown,
+          tools: {
+            step: typeof step;
+            done: (value: unknown) => RuntimeLoopDone;
+          },
+        ) => MaybePromise<unknown>,
+        options: { snapshotEvery?: number; maxIterations?: number } = {},
+      ): Promise<unknown> {
+        const operationPath = engine.allocatePath();
+        const key = pathKey(operationPath);
+        const record = run.loops[key];
+        if (!record) {
+          throw new CompatibilityNewOperation(`loop ${key} was inserted before the recorded frontier`);
+        }
+        visitedLoops.add(key);
+        const recordedIterations: number[] = [];
+        const collectIteration = (path: readonly number[]): void => {
+          if (!pathStartsWith(path, operationPath) || path.length <= operationPath.length) return;
+          const iteration = path[operationPath.length];
+          if (iteration !== undefined) recordedIterations.push(iteration);
+        };
+        for (const recordedStep of run.steps) collectIteration(recordedStep.path);
+        for (const candidate of Object.keys(run.ops)) {
+          collectIteration(candidate.split(".").map(Number));
+        }
+        for (const candidate of Object.keys(run.loops)) {
+          collectIteration(candidate.split(".").map(Number));
+        }
+        for (const childId of run.children) {
+          const prefix = `${run.runId}:`;
+          if (!childId.startsWith(prefix)) continue;
+          const childPath = childId.slice(prefix.length).split(":").map(Number);
+          collectIteration(childPath.slice(0, -1));
+        }
+        const lastRecordedIteration = recordedIterations.length > 0
+          ? Math.max(...recordedIterations)
+          : -1;
+        const expectedDoneIteration = record.done
+          ? record.doneIteration ?? Math.max(record.snapshotIteration, lastRecordedIteration + 1)
+          : undefined;
+        const recordedIterationCount = Math.max(
+          record.snapshotIteration,
+          lastRecordedIteration + 1,
+          expectedDoneIteration === undefined ? 0 : expectedDoneIteration + 1,
+        );
+        let state = cloneSerializable(initialState);
+        let iteration = 0;
+        while (iteration < recordedIterationCount) {
+          const value = await engine.pathStorage.run(
+            { prefix: [...operationPath, iteration], counter: 0 },
+            () => reducer(state, {
+              step,
+              done: (output) => ({ [loopDone]: true, value: output }),
+            }),
+          );
+          if (value && typeof value === "object" && (value as RuntimeLoopDone)[loopDone]) {
+            if (!record.done || expectedDoneIteration !== iteration) {
+              return mismatch(`loop ${key} completed at a different iteration`);
+            }
+            return record.output;
+          }
+          if (expectedDoneIteration === iteration) {
+            return mismatch(`loop ${key} no longer completes at its recorded iteration`);
+          }
+          state = cloneSerializable(value);
+          iteration++;
+        }
+        throw new CompatibilityFrontier(`loop ${key} continues beyond recorded history`);
+      },
+      async waitFor(
+        name: string,
+        schemaOrOptions?: StandardSchemaV1 | { timeoutMs?: number },
+        maybeOptions?: { timeoutMs?: number },
+      ): Promise<unknown> {
+        const path = engine.allocatePath();
+        const key = pathKey(path);
+        const operation = run.ops[key];
+        if (!operation || operation.kind !== "wait" || operation.signal !== name) {
+          return mismatch(`wait ${key} does not match recorded history`);
+        }
+        visitedOps.add(key);
+        const schema = schemaOrOptions && "~standard" in schemaOrOptions
+          ? schemaOrOptions as StandardSchemaV1
+          : undefined;
+        const options = schema
+          ? maybeOptions ?? {}
+          : (schemaOrOptions as { timeoutMs?: number } | undefined) ?? maybeOptions ?? {};
+        if (operation.payload !== undefined) {
+          try {
+            return await schemaValidate(schema, operation.payload);
+          } catch {
+            return mismatch(`wait ${key} schema rejects its recorded payload`);
+          }
+        }
+        if (run.waitingFor?.signal === name) {
+          const since = Date.parse(run.waitingFor.since);
+          commitPolicyUpdates.push(() => {
+            if (options.timeoutMs === undefined) {
+              delete operation.timeoutAt;
+              if (run.waitingFor) delete run.waitingFor.timeoutAt;
+            } else {
+              operation.timeoutAt = since + options.timeoutMs;
+              if (run.waitingFor) run.waitingFor.timeoutAt = operation.timeoutAt;
+            }
+          });
+        }
+        throw new CompatibilityFrontier(`wait ${key} is unresolved`);
+      },
+      sleep: compatibilitySleep,
+      async sleepUntil(_date: Date): Promise<void> {
+        return compatibilitySleep();
+      },
+      now: (): number => {
+        const path = engine.allocatePath();
+        const key = pathKey(path);
+        const operation = run.ops[key];
+        if (!operation || operation.kind !== "now") {
+          return mismatch(`now ${key} does not match recorded history`);
+        }
+        visitedOps.add(key);
+        return operation.value as number;
+      },
+      random: (): number => {
+        const path = engine.allocatePath();
+        const key = pathKey(path);
+        const operation = run.ops[key];
+        if (!operation || operation.kind !== "random") {
+          return mismatch(`random ${key} does not match recorded history`);
+        }
+        visitedOps.add(key);
+        return operation.value as number;
+      },
+      log: (..._args: readonly unknown[]): void => {
+        const path = engine.allocatePath();
+        const key = pathKey(path);
+        const operation = run.ops[key];
+        if (!operation || operation.kind !== "log") {
+          return mismatch(`log ${key} does not match recorded history`);
+        }
+        visitedOps.add(key);
+      },
+      annotate: (_values: Record<string, JsonValue>): void => {
+        const path = engine.allocatePath();
+        const key = pathKey(path);
+        const operation = run.ops[key];
+        if (!operation || operation.kind !== "annotate") {
+          return mismatch(`annotation ${key} does not match recorded history`);
+        }
+        visitedOps.add(key);
+      },
+      charge: (_amount: Budget): void => {
+        const path = engine.allocatePath();
+        const key = pathKey(path);
+        const operation = run.ops[key];
+        if (!operation || operation.kind !== "charge") {
+          return mismatch(`charge ${key} does not match recorded history`);
+        }
+        visitedOps.add(key);
+      },
+      complete: (value: unknown): never => {
+        throw new CompleteSignal(cloneSerializable(value));
+      },
+    };
+
+    try {
+      await engine.pathStorage.run(
+        { prefix: [], counter: 0 },
+        () => definition[workflowInternal].fn(
+          context as unknown as WorkflowContext,
+          run.input,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof CompatibilityMismatch) return false;
+      if (error instanceof CompatibilityNewOperation) return false;
+      // A frontier, a deliberate completion, or the workflow's own terminal
+      // error is compatible if every recorded durable operation was visited.
+    }
+
+    const stepsMatch = run.steps.every((record) => visitedSteps.has(pathKey(record.path)));
+    const opsMatch = Object.keys(run.ops).every((key) => visitedOps.has(key));
+    const loopsMatch = Object.keys(run.loops).every((key) => visitedLoops.has(key));
+    const childrenMatch = run.children.every((childId) => visitedChildren.has(childId));
+    if (!stepsMatch || !opsMatch || !loopsMatch || !childrenMatch) return false;
+    for (const update of commitPolicyUpdates) update();
+    return true;
+  }
+
   async enqueue<Input, Output>(
     workflowValue: Workflow<Input, Output>,
     inputValue: Input,
@@ -1283,14 +1653,46 @@ class EngineImpl implements Engine {
     }
     const inputHash = hash(stableStringify(input));
     const name = definition.name ?? "workflow";
+    const workflowIdentity = definition[workflowInternal].identityName;
     const candidates = [...this.runs.values()]
-      .filter((run) => run.workflow === name)
+      .filter((run) =>
+        workflowIdentity === undefined
+          ? run.workflowIdentity === undefined
+          : run.workflowIdentity === workflowIdentity
+      )
       .sort((left, right) => right.createdAt - left.createdAt);
     let existing: InternalRun | undefined;
+    let compatibilityAlreadyChecked = false;
     if (options.key !== undefined) {
-      existing = candidates.find((run) => run.key === options.key);
-      if (existing && existing.inputHash !== inputHash) {
-        throw new KeyConflictError(`key ${options.key} is already bound to another input`);
+      const keyedCandidates = candidates.filter((run) => run.key === options.key);
+      if (workflowIdentity !== undefined) {
+        existing = keyedCandidates[0];
+        if (existing && existing.inputHash !== inputHash) {
+          throw new KeyConflictError(`key ${options.key} is already bound to another input`);
+        }
+      } else {
+        existing = keyedCandidates.find((run) =>
+          run.bodyHash === definition[workflowInternal].bodyHash
+        );
+        if (existing && existing.inputHash !== inputHash) {
+          throw new KeyConflictError(`key ${options.key} is already bound to another input`);
+        }
+        if (!existing) {
+          for (const candidate of keyedCandidates.filter((run) =>
+            run.inputHash === inputHash
+            && (
+              !this.isTerminal(run.status)
+              || run.status === "failed"
+              || run.status === "stale"
+            )
+          )) {
+            if (await this.isStructurallyCompatible(candidate, definition)) {
+              existing = candidate;
+              compatibilityAlreadyChecked = true;
+              break;
+            }
+          }
+        }
       }
     } else if (matchImplicitIdentity) {
       existing = candidates.find((run) =>
@@ -1302,10 +1704,40 @@ class EngineImpl implements Engine {
         && run.inputHash === inputHash
         && run.status === "failed"
       );
+      const changedCandidates = existing
+        ? []
+        : candidates.filter((run) =>
+          run.inputHash === inputHash
+          && (
+            !this.isTerminal(run.status)
+            || run.status === "failed"
+            || run.status === "stale"
+          )
+        );
+      for (const candidate of changedCandidates) {
+        if (await this.isStructurallyCompatible(candidate, definition)) {
+          existing = candidate;
+          compatibilityAlreadyChecked = true;
+          break;
+        }
+      }
+      if (!existing && workflowIdentity !== undefined) {
+        existing = changedCandidates[0];
+      }
+    }
+
+    if (
+      existing
+      && existing.bodyHash !== definition[workflowInternal].bodyHash
+      && (existing.status === "completed" || existing.status === "cancelled")
+    ) {
+      existing = undefined;
     }
 
     if (existing && existing.bodyHash !== definition[workflowInternal].bodyHash) {
-      if (!this.isTerminal(existing.status) || existing.status === "stale") {
+      const compatible = compatibilityAlreadyChecked
+        || await this.isStructurallyCompatible(existing, definition);
+      if (!compatible) {
         existing.status = "stale";
         existing.workflowDef = definition;
         await this.persist(existing);
@@ -1313,7 +1745,20 @@ class EngineImpl implements Engine {
           runId: existing.runId,
         });
       }
-      existing = undefined;
+      existing.bodyHash = definition[workflowInternal].bodyHash;
+      existing.workflow = name;
+      existing.workflowIdentity = workflowIdentity;
+      existing.workflowDef = definition;
+      if (existing.status === "stale") {
+        existing.status = existing.waitingFor
+          ? "waiting"
+          : existing.wakeAt !== undefined
+            ? "sleeping"
+            : existing.error
+              ? "failed"
+              : "pending";
+      }
+      await this.persist(existing);
     }
 
     if (existing && existing.status !== "completed") {
@@ -1740,6 +2185,7 @@ class EngineImpl implements Engine {
 
       if (record?.status === "ok") {
         record.compensate = options.compensate;
+        record.compensationHash = functionHash(options.compensate);
         try {
           return options.schema ? await schemaValidate(options.schema, record.output) : record.output;
         } catch (error) {
@@ -1762,6 +2208,7 @@ class EngineImpl implements Engine {
       }
       record.label = label;
       record.compensate = options.compensate;
+      record.compensationHash = functionHash(options.compensate);
 
       const previous = record.attemptHistory.at(-1);
       if (
@@ -2090,6 +2537,7 @@ class EngineImpl implements Engine {
           if (value && typeof value === "object" && (value as RuntimeLoopDone)[loopDone]) {
             const output = cloneSerializable((value as RuntimeLoopDone).value);
             record.done = true;
+            record.doneIteration = iteration;
             record.output = output;
             if (!replay) await engine.persist(run);
             return output;
@@ -2486,9 +2934,39 @@ class EngineImpl implements Engine {
 
     const inputHash = hash(stableStringify(input));
     const name = definition.name ?? "workflow";
+    const workflowIdentity = definition[workflowInternal].identityName;
     const candidates = [...this.runs.values()]
-      .filter((run) => run.workflow === name)
+      .filter((run) =>
+        workflowIdentity === undefined
+          ? run.workflowIdentity === undefined
+          : run.workflowIdentity === workflowIdentity
+      )
       .sort((left, right) => right.createdAt - left.createdAt);
+    const compatibilityCandidate = !options.fresh
+      ? options.key !== undefined
+        ? candidates.find((run) =>
+            run.key === options.key
+            && run.inputHash === inputHash
+            && run.bodyHash !== definition[workflowInternal].bodyHash
+            && (
+              !this.isTerminal(run.status)
+              || run.status === "failed"
+              || run.status === "stale"
+            )
+          )
+        : candidates.find((run) =>
+            run.inputHash === inputHash
+            && run.bodyHash !== definition[workflowInternal].bodyHash
+            && (
+              !this.isTerminal(run.status)
+              || run.status === "failed"
+              || run.status === "stale"
+            )
+          )
+      : undefined;
+    if (compatibilityCandidate) {
+      return this.runDirect(workflowValue, input, options);
+    }
     let existing: InternalRun | undefined;
     if (!options.fresh && options.key !== undefined) {
       existing = candidates.find((run) => run.key === options.key);
