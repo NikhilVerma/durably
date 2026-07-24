@@ -236,13 +236,13 @@ describe("M5 engine lifecycle and operations", () => {
     const wf = workflow(async (ctx) =>
       ctx.step(() => Promise.resolve(++calls), { name: "work" })
     );
-    const handle = await engine.enqueue(wf, undefined, { delayMs: 1 });
+    const handle = await engine.enqueue(wf, undefined, { delayMs: 100 });
     await engine.start();
 
     await engine.drain();
     expect(calls).toBe(0);
     expect((await engine.inspect(handle.runId))?.status).toBe("pending");
-    await new Promise((resolve) => setTimeout(resolve, 2));
+    await new Promise((resolve) => setTimeout(resolve, 120));
     await engine.drain();
     expect(calls).toBe(1);
     await engine.stop();
