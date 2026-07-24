@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowJs": false,
+    "noEmit": true,
+    "types": ["bun"],
+    "exactOptionalPropertyTypes": true
+  },
+  "include": [
+    "index.ts",
+    "tests/types/**/*.ts"
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "durably",
+  "module": "index.ts",
+  "type": "module",
+  "scripts": {
+    "test": "bun test tests/unit tests/integration",
+    "test:unit": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
+    "test:types": "bunx tsc -p tsconfig.types.json",
+    "test:all": "bun run test:types && bun test tests/unit tests/integration"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "gpt-tokenizer": "^3.4.0"
+  },
+  "peerDependencies": {
+    "typescript": "^6"
+  }
+}
