@@ -3,7 +3,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { FileStorage, createEngine, workflow } from "../../index.ts";
-import { deferred, findFilesNamed, tick, withTempDir } from "../support/kit.ts";
+import {
+  deferred,
+  findFilesNamed,
+  objectWithStringIdSchema,
+  tick,
+  withTempDir,
+} from "../support/kit.ts";
 
 const workerPath = fileURLToPath(new URL("../fixtures/lease-worker.ts", import.meta.url));
 
@@ -145,6 +151,120 @@ describe("file-backed engine cooperation", () => {
         if (owner.exitCode === null && owner.signalCode === null) owner.kill("SIGKILL");
         if (subscriber && subscriber.exitCode === null && subscriber.signalCode === null) subscriber.kill("SIGKILL");
       }
+    });
+  });
+
+  it("heartbeats a long-running step so a rival engine cannot steal its lease", async () => {
+    await withTempDir(async (dir) => {
+      const gate = deferred<void>();
+      let effects = 0;
+      const wf = workflow({ name: "long-step" }, async (ctx) =>
+        ctx.step(async () => {
+          effects++;
+          await gate.promise;
+          return "charged";
+        }, { name: "charge" })
+      );
+      const owner = createEngine({ storage: new FileStorage(dir), leaseMs: 200 });
+      const rival = createEngine({ storage: new FileStorage(dir), leaseMs: 200 });
+      await owner.start();
+      const handle = await owner.enqueue(wf, undefined, { key: "long" });
+      await tick();
+      expect(effects).toBe(1);
+
+      await rival.start();
+      await rival.enqueue(wf, undefined, { key: "long" });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      expect(effects).toBe(1);
+      gate.resolve();
+      await Promise.all([owner.drain(), rival.drain()]);
+
+      expect(effects).toBe(1);
+      expect(await owner.inspect(handle.runId)).toEqual(expect.objectContaining({
+        status: "completed",
+        result: "charged",
+      }));
+      await owner.stop();
+      await rival.stop();
+    });
+  }, 15_000);
+
+  it("a stale lease owner discards its work instead of overwriting the new owner's state", async () => {
+    await withTempDir(async (dir) => {
+      const gate = deferred<void>();
+      let attempts = 0;
+      const wf = workflow({ name: "stealable" }, async (ctx) =>
+        ctx.step(async () => {
+          const attempt = ++attempts;
+          if (attempt === 1) await gate.promise;
+          return attempt;
+        }, { name: "charge" })
+      );
+      const stale = createEngine({
+        storage: new FileStorage(dir),
+        leaseMs: 30,
+        heartbeatMs: 10_000,
+      });
+      await stale.start();
+      const handle = await stale.enqueue(wf, undefined, { key: "stolen" });
+      await tick();
+      expect(attempts).toBe(1);
+
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const reclaimer = createEngine({
+        storage: new FileStorage(dir),
+        leaseMs: 30,
+        heartbeatMs: 10_000,
+      });
+      await reclaimer.start();
+      await reclaimer.drain();
+      expect(await reclaimer.inspect(handle.runId)).toEqual(expect.objectContaining({
+        status: "completed",
+        result: 2,
+      }));
+
+      gate.resolve();
+      await stale.drain();
+
+      expect(await reclaimer.inspect(handle.runId)).toEqual(expect.objectContaining({
+        status: "completed",
+        result: 2,
+      }));
+      expect((await stale.inspect(handle.runId))?.result).toBe(2);
+      expect(attempts).toBe(2);
+      await stale.stop();
+      await reclaimer.stop();
+    });
+  }, 15_000);
+
+  it("stays parked when another engine delivers a payload the wait rejects", async () => {
+    await withTempDir(async (dir) => {
+      const wf = workflow({ name: "approval-gate" }, async (ctx) =>
+        ctx.waitFor("approval", objectWithStringIdSchema)
+      );
+      const parker = createEngine({ storage: new FileStorage(dir) });
+      await parker.start();
+      const handle = await parker.enqueue(wf, undefined);
+      await parker.drain();
+      expect((await parker.inspect(handle.runId))?.status).toBe("waiting");
+      await parker.stop();
+
+      // This engine never executed the workflow body, so it cannot hold the
+      // wait's schema: the payload can only be checked where it is consumed.
+      const signaller = createEngine({ storage: new FileStorage(dir) });
+      await signaller.start();
+      await signaller.signal(handle.runId, "approval", { id: 42 });
+      await signaller.drain();
+      expect((await signaller.inspect(handle.runId))?.status).toBe("waiting");
+
+      await signaller.signal(handle.runId, "approval", { id: "operator-1" });
+      await signaller.drain();
+      expect(await signaller.inspect(handle.runId)).toEqual(expect.objectContaining({
+        status: "completed",
+        result: { id: "operator-1" },
+      }));
+      await signaller.stop();
     });
   });
 

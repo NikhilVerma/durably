@@ -3,10 +3,14 @@ import { appendFile, readFile, stat, truncate, writeFile } from "node:fs/promise
 import {
   FileStorage,
   MemoryStorage,
+  StepTimeoutError,
   createEngine,
   run,
   workflow,
+  type RunClaim,
   type StorageAdapter,
+  type StorageListOptions,
+  type StoredRun,
 } from "../../index.ts";
 import { findFilesNamed, readJson, withTempDir } from "../support/kit.ts";
 
@@ -253,5 +257,194 @@ describe("M4 storage adapter contract", () => {
       expect(parts[idIndex - 1]).toBe(handle.runId.slice(0, 2));
       await engine.stop();
     });
+  });
+});
+
+describe("M4 hydration fidelity", () => {
+  it("keeps Date values in recorded outputs, annotations, and results across a new engine", async () => {
+    await withTempDir(async (dir) => {
+      const recordedAt = new Date("2026-01-02T03:04:05.000Z");
+      const startedAt = new Date("2026-05-05T00:00:00.000Z");
+      let executions = 0;
+      const wf = workflow({ name: "hydrated-dates" }, async (ctx) => {
+        const produced = await ctx.step(() => {
+          executions++;
+          return Promise.resolve({ at: recordedAt, count: 1 });
+        }, { name: "produce" });
+        ctx.annotate({ startedAt });
+        await ctx.waitFor("go");
+        return { at: produced.at, isDate: produced.at instanceof Date, count: produced.count };
+      });
+
+      const first = createEngine({ storage: new FileStorage(dir) });
+      await first.start();
+      const handle = await first.enqueue(wf, undefined, { key: "resume-me" });
+      await first.drain();
+      await first.stop();
+
+      const second = createEngine({ storage: new FileStorage(dir) });
+      await second.start();
+      const hydrated = await second.inspect(handle.runId) as unknown as {
+        steps: { output?: { at?: unknown } }[];
+      };
+      expect(hydrated.steps[0]?.output?.at).toBeInstanceOf(Date);
+      expect(hydrated.steps[0]?.output).toEqual({ at: recordedAt, count: 1 });
+      expect((await second.inspect(handle.runId))?.annotations?.startedAt).toEqual(startedAt);
+
+      await second.signal(handle.runId, "go", null);
+      await second.drain();
+      const final = await second.inspect(handle.runId);
+      expect(final?.status).toBe("completed");
+      expect(final?.result).toEqual({ at: recordedAt, isDate: true, count: 1 });
+      expect(executions).toBe(1);
+      await second.stop();
+    });
+  });
+
+  it("keeps recorded errors as Error instances with their class and message", async () => {
+    await withTempDir(async (dir) => {
+      const wf = workflow({ name: "hydrated-errors" }, async (ctx) => {
+        await ctx.step(() => {
+          const error = new Error("card declined");
+          error.name = "PaymentError";
+          return Promise.reject(error);
+        }, { name: "charge" });
+        return "unreachable";
+      });
+
+      const first = createEngine({ storage: new FileStorage(dir) });
+      await first.start();
+      const handle = await first.enqueue(wf, undefined);
+      await first.drain();
+      await first.stop();
+
+      const second = createEngine({ storage: new FileStorage(dir) });
+      await second.start();
+      const state = await second.inspect(handle.runId) as unknown as {
+        status: string;
+        error?: unknown;
+        steps: { error?: unknown }[];
+      };
+      expect(state.status).toBe("failed");
+      expect(state.error).toBeInstanceOf(Error);
+      expect(state.error).toEqual(expect.objectContaining({
+        name: "PaymentError",
+        message: "card declined",
+      }));
+      expect(state.steps[0]?.error).toBeInstanceOf(Error);
+      await second.stop();
+    });
+  });
+
+  it("rebuilds durably error subclasses by class after hydration", async () => {
+    await withTempDir(async (dir) => {
+      const wf = workflow({ name: "hydrated-typed-errors" }, async (ctx) => {
+        await ctx.step(
+          ({ signal }) =>
+            new Promise<never>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+            }),
+          { name: "hangs", timeoutMs: 10 },
+        );
+        return "unreachable";
+      });
+
+      const first = createEngine({ storage: new FileStorage(dir) });
+      await first.start();
+      const handle = await first.enqueue(wf, undefined);
+      await first.drain();
+      await first.stop();
+
+      const second = createEngine({ storage: new FileStorage(dir) });
+      await second.start();
+      const state = await second.inspect(handle.runId);
+      expect(state?.error).toBeInstanceOf(StepTimeoutError);
+      expect(state?.error).toEqual(expect.objectContaining({ timeoutMs: 10 }));
+      await second.stop();
+    });
+  });
+});
+
+describe("M4 third-party storage adapter conformance", () => {
+  class MinimalStorage implements StorageAdapter {
+    readonly events = new Map<string, unknown[]>();
+    readonly states = new Map<string, StoredRun>();
+    readonly claims = new Map<string, RunClaim>();
+
+    async init(): Promise<void> {}
+    async createRun(storedRun: StoredRun): Promise<void> {
+      this.states.set(storedRun.runId, storedRun);
+      this.events.set(storedRun.runId, []);
+    }
+    async append(runId: string, event: unknown): Promise<void> {
+      this.events.get(runId)?.push(event);
+      const state = (event as { state?: StoredRun["state"] }).state;
+      if (state) this.states.set(runId, { runId, state });
+    }
+    async read(runId: string): Promise<unknown[] | null> {
+      return this.events.get(runId) ?? null;
+    }
+    async claim(runId: string, claim: RunClaim): Promise<boolean> {
+      const existing = this.claims.get(runId);
+      if (existing && existing.owner !== claim.owner && Date.parse(existing.expiresAt) > Date.now()) {
+        return false;
+      }
+      this.claims.set(runId, claim);
+      return true;
+    }
+    async heartbeat(runId: string, claim: RunClaim): Promise<boolean> {
+      const existing = this.claims.get(runId);
+      if (existing && existing.owner !== claim.owner) return false;
+      this.claims.set(runId, claim);
+      return true;
+    }
+    async list(options: StorageListOptions = {}): Promise<StoredRun[]> {
+      return [...this.states.values()]
+        .filter(({ state }) =>
+          (!options.status || state.status === options.status)
+          && (!options.workflow || state.workflow === options.workflow)
+        )
+        .slice(0, options.limit);
+    }
+  }
+
+  it("drives a full run through an adapter implementing only the seven documented methods", async () => {
+    const storage = new MinimalStorage();
+    const engine = createEngine({ storage, concurrency: 2 });
+    const wf = workflow<{ value: number }>()(async (ctx, input) => {
+      const doubled = await ctx.step(() => Promise.resolve(input.value * 2), { name: "double" });
+      await ctx.waitFor("approve");
+      return doubled + 1;
+    });
+    await engine.start();
+
+    const handle = await engine.enqueue(wf, { value: 20 });
+    await engine.drain();
+    expect((await engine.inspect(handle.runId))?.status).toBe("waiting");
+
+    await engine.signal(handle.runId, "approve", { by: "operator" });
+    await engine.drain();
+    expect(await engine.inspect(handle.runId)).toEqual(expect.objectContaining({
+      status: "completed",
+      result: 41,
+    }));
+    expect(await engine.list({ status: "completed" })).toHaveLength(1);
+    expect((storage.events.get(handle.runId) ?? []).length).toBeGreaterThan(0);
+    await engine.stop();
+  });
+
+  it("keeps runs isolated between adapters without optional release or resource hooks", async () => {
+    const storage = new MinimalStorage();
+    const engine = createEngine({ storage });
+    const wf = workflow(async (ctx) =>
+      ctx.step(() => Promise.reject(new Error("provider down")), { name: "call" })
+    );
+    await engine.start();
+    const handle = await engine.enqueue(wf, undefined);
+    await engine.drain();
+
+    expect((await engine.inspect(handle.runId))?.status).toBe("failed");
+    expect(storage.claims.has(handle.runId)).toBe(true);
+    await engine.stop();
   });
 });

@@ -226,7 +226,11 @@ describe("M8 README and agent-context release gates", () => {
 
     expect(changelog).toContain("## [Unreleased]");
     expect(changelog).toContain("structural compatibility replay");
-    expect(changelog).toContain(`## [${pkg.version}] - 2026-07-24`);
+    // The shipped version must have a dated release section of its own; the
+    // date is whatever that release carries, not a fixed day.
+    expect(changelog).toMatch(
+      new RegExp(`## \\[${pkg.version.replace(/\./g, "\\.")}\\] - \\d{4}-\\d{2}-\\d{2}`),
+    );
     expect(changelog.indexOf("## [Unreleased]")).toBeLessThan(
       changelog.indexOf(`## [${pkg.version}]`),
     );

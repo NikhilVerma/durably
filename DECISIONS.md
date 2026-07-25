@@ -2,6 +2,40 @@
 
 Append-only governance notes for choices that affect the public contract.
 
+## 2026-07-25 — Durable records are immutable, and the lease owner writes state
+
+Four contract points follow from one rule: what is recorded describes the world,
+so nothing may quietly rewrite or discard it.
+
+A delivered signal payload is a durable record like a step output. It stays in
+the run's operations and replays return it, so a satisfied `waitFor` never parks
+a second time. Signals are addressed by the durable path of the parked wait, not
+by signal name; a workflow may await the same name repeatedly.
+
+A wait's schema is code inside the workflow body: it cannot be persisted, and a
+process that has not executed the body cannot hold it. Payloads are therefore
+checked where they are consumed. A payload the wait rejects was never delivered
+— it is discarded and the run stays parked for a corrected signal — so the
+outcome is the same whichever process sent it. `signal` still validates eagerly
+when the schema is already known locally, so that caller fails fast.
+
+A terminal run is history. `cancel` leaves completed, failed, cancelled, and
+stale runs, and their children, untouched.
+
+A compensation states that its step's effect was undone, so the recorded output
+no longer describes the world. `retry` re-executes every compensated step
+whatever step selector it is given.
+
+Only the lease owner may commit. An engine re-asserts its lease around effects
+and, on discovering the run was reclaimed, raises `LeaseLostError`, discards its
+diverged in-memory run, and adopts the stored outcome rather than persisting
+over the new owner. A lease that expires mid-attempt can still duplicate that
+attempt's effect; preventing that requires storage-level fencing and remains
+open.
+
+`ctx.charge` rejects negative amounts. Budgets are caps, and a refund would let
+a run slip back under a ceiling it had already crossed.
+
 ## 2026-07-24 — Execution policy edits preserve durable history
 
 The workflow body hash is a compatibility fast path, not durable identity. When a resumable run has the same workflow family and input/key but a different body hash, durably performs an effect-free structural replay over recorded history. Matching paths, operation kinds, and labels keep the run; the new body hash is pinned before failed or unfinished work continues.

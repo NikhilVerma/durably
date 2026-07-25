@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   BudgetExceededError,
+  DurablyError,
   StepTimeoutError,
   ValidationError,
   testEngine,
@@ -483,5 +484,55 @@ describe("M3 policies: validation, compensation, concurrency, and budget", () =>
       tokensSpent: 200,
       tokenRemaining: 800,
     });
+  });
+
+  it("reports an unlimited budget kind as infinite remaining", async () => {
+    const wf = workflow(async (ctx) => {
+      ctx.charge({ tokens: 10 });
+      return {
+        usdUnlimited: ctx.budget.remaining("usd") === Number.POSITIVE_INFINITY,
+        tokensRemaining: ctx.budget.remaining("tokens"),
+      };
+    });
+
+    const result = await testEngine().run(wf, undefined, { budget: { tokens: 100 } });
+    expect(result.result).toEqual({ usdUnlimited: true, tokensRemaining: 90 });
+  });
+
+  it("refuses to return a non-finite remaining budget across the durable boundary", async () => {
+    const wf = workflow(async (ctx) => ({ remaining: ctx.budget.remaining("usd") }));
+
+    const result = await testEngine().run(wf, undefined);
+    expect(result.status).toBe("failed");
+    expect(result.error).toEqual(expect.objectContaining({
+      path: expect.stringMatching(/remaining/),
+    }));
+  });
+
+  it("rejects a negative charge instead of refunding spend back under the cap", async () => {
+    const wf = workflow(async (ctx) => {
+      ctx.charge({ usd: 5 });
+      ctx.charge({ usd: -10 });
+      return ctx.budget.remaining("usd");
+    });
+
+    const result = await testEngine().run(wf, undefined, { budget: { usd: 6 } });
+    expect(result.status).toBe("failed");
+    expect(result.error).toBeInstanceOf(DurablyError);
+    expect(result.error).toEqual(expect.objectContaining({
+      message: expect.stringMatching(/non-negative/i),
+    }));
+  });
+
+  it("treats a zero charge as a no-op that still records its durable position", async () => {
+    const wf = workflow(async (ctx) => {
+      ctx.charge({ usd: 0 });
+      ctx.charge({ usd: 0.5 });
+      return ctx.budget.spent("usd");
+    });
+
+    const result = await testEngine().run(wf, undefined, { budget: { usd: 1 } });
+    expect(result.status).toBe("completed");
+    expect(result.result).toBe(0.5);
   });
 });

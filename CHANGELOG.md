@@ -7,6 +7,37 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-25
+
+### Fixed
+
+- Hydration no longer flattens `Date` values and recorded `Error`s to `{}` when
+  another process resumes a run. Decoding is now idempotent, and a recorded
+  error keeps its class and reported name.
+- Signals are routed by the durable path of the parked `waitFor` instead of by
+  signal name, so a workflow may await the same signal name more than once.
+- A delivered signal payload stays recorded, so replaying a satisfied `waitFor`
+  returns its value instead of parking the run again.
+- Signal payloads are validated where the wait's schema exists, inside the
+  workflow. A payload sent by a process that never ran the body no longer fails
+  the run permanently: it is discarded, the run stays parked for a corrected
+  signal, and the refusal is visible on the recorded wait.
+- `cancel` leaves an already-terminal run and its children untouched instead of
+  rewriting a completed outcome.
+- `retry` re-executes steps whose compensations already ran, so a retried saga
+  can no longer complete on state that was rolled back.
+- A step attempt that outlives its lease is discarded instead of being written
+  over the state of the engine that reclaimed the run; that engine adopts the
+  stored outcome and `LeaseLostError` is now raised by the runtime.
+- The default heartbeat interval fits inside short leases instead of being
+  pinned at 100ms.
+
+### Changed
+
+- `ctx.charge` rejects negative amounts so recorded spend stays monotonic.
+- Array holes are normalized to `null` at the durable boundary so a live value
+  and the value a resumed process reads back have the same shape.
+
 ## [0.2.0] - 2026-07-24
 
 ### Added

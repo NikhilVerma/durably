@@ -3,6 +3,8 @@ import {
   MemoryStorage,
   RunCancelledError,
   createEngine,
+  isOk,
+  partition,
   testEngine,
   workflow,
 } from "../../index.ts";
@@ -133,6 +135,35 @@ describe("M6 topology: parallel paths and result values", () => {
       expect(step.path[0]).toBe(0);
       expect(step.path).toHaveLength(3);
     }
+  });
+
+  it("narrows parallel results with the exported isOk and partition helpers", async () => {
+    const wf = workflow(async (ctx) => {
+      const results = await ctx.parallel([
+        () => ctx.step(() => Promise.resolve(1), { name: "one" }),
+        () => ctx.step(() => Promise.reject(new Error("broken")), { name: "broken" }),
+        () => ctx.step(() => Promise.resolve(3), { name: "three" }),
+      ]);
+      const [values, errors] = partition(results);
+      return {
+        kept: results.filter(isOk).map((result) => result.value),
+        values,
+        errorMessages: errors.map((error) => (error as Error).message),
+      };
+    });
+
+    const result = await testEngine().run(wf, undefined);
+    expect(result.result).toEqual({
+      kept: [1, 3],
+      values: [1, 3],
+      errorMessages: ["broken"],
+    });
+  });
+
+  it("partitions an empty result list into two empty arrays", () => {
+    expect(partition([])).toEqual([[], []]);
+    expect(isOk({ ok: true, value: 1 })).toBe(true);
+    expect(isOk({ ok: false, error: new Error("x") })).toBe(false);
   });
 
   it("nests branch-local path frames recursively", async () => {
@@ -308,6 +339,42 @@ describe("M6 agent primitives: loop, wait, sleep, stash", () => {
     expect(result.error).toEqual(expect.objectContaining({
       message: expect.stringMatching(/maxIterations|iteration/i),
     }));
+  });
+
+  it("allows done on the final permitted iteration of maxIterations", async () => {
+    const observed: number[] = [];
+    const wf = workflow(async (ctx) =>
+      ctx.loop({ turn: 0 }, async (state, { done }) => {
+        observed.push(state.turn);
+        if (state.turn === 2) return done(state.turn);
+        return { turn: state.turn + 1 };
+      }, { maxIterations: 3 })
+    );
+
+    const result = await testEngine().run(wf, undefined);
+    expect(result.status).toBe("completed");
+    expect(result.result).toBe(2);
+    expect(observed).toEqual([0, 1, 2]);
+  });
+
+  it("routes each signal to the wait the run is currently parked on", async () => {
+    const te = testEngine();
+    const wf = workflow(async (ctx) => {
+      const first = await ctx.waitFor("go");
+      const second = await ctx.waitFor("go");
+      return { first, second };
+    });
+
+    let state = await te.run(wf, undefined);
+    expect(state.status).toBe("waiting");
+    await te.signal(state.runId, "go", { n: 1 });
+    state = await te.resume(state.runId);
+    expect(state.status).toBe("waiting");
+    await te.signal(state.runId, "go", { n: 2 });
+    state = await te.resume(state.runId);
+
+    expect(state.status).toBe("completed");
+    expect(state.result).toEqual({ first: { n: 1 }, second: { n: 2 } });
   });
 
   it("resumes from the latest snapshot instead of replaying old reducers", async () => {

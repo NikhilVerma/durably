@@ -430,4 +430,167 @@ describe("M5 engine lifecycle and operations", () => {
     ]);
     await engine.stop();
   });
+
+  it("routes each signal to the wait the run is currently parked on", async () => {
+    const engine = createEngine({ storage: new MemoryStorage() });
+    const wf = workflow(async (ctx) => {
+      const first = await ctx.waitFor("go");
+      const second = await ctx.waitFor("go");
+      return { first, second };
+    });
+    await engine.start();
+    const handle = await engine.enqueue(wf, undefined);
+    await engine.drain();
+
+    await engine.signal(handle.runId, "go", { n: 1 });
+    await engine.drain();
+    expect((await engine.inspect(handle.runId))?.status).toBe("waiting");
+
+    await engine.signal(handle.runId, "go", { n: 2 });
+    await engine.drain();
+    expect(await engine.inspect(handle.runId)).toEqual(expect.objectContaining({
+      status: "completed",
+      result: { first: { n: 1 }, second: { n: 2 } },
+    }));
+    await engine.stop();
+  });
+
+  it("caps simultaneously executing runs at the engine concurrency limit", async () => {
+    const gates = Array.from({ length: 6 }, () => deferred<void>());
+    let active = 0;
+    let peak = 0;
+    const engine = createEngine({ storage: new MemoryStorage(), concurrency: 2 });
+    const wf = workflow<{ index: number }>()(async (ctx, input) =>
+      ctx.step(async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await gates[input.index]!.promise;
+        active--;
+        return input.index;
+      }, { name: "work" })
+    );
+    for (let index = 0; index < gates.length; index++) await engine.enqueue(wf, { index });
+    await engine.start();
+    await tick();
+
+    expect(peak).toBe(2);
+    for (const gate of gates) gate.resolve();
+    await engine.drain();
+
+    expect(peak).toBe(2);
+    expect(await engine.list({ status: "completed" })).toHaveLength(gates.length);
+    await engine.stop();
+  });
+});
+
+describe("M5 terminal-state protection", () => {
+  it.each(["completed", "failed"] as const)("cancel leaves a %s run untouched", async (outcome) => {
+    const engine = createEngine({ storage: new MemoryStorage() });
+    const wf = workflow(async (ctx) =>
+      ctx.step(() => {
+        if (outcome === "failed") throw new Error("terminal failure");
+        return Promise.resolve("done");
+      }, { name: "work" })
+    );
+    await engine.start();
+    const handle = await engine.enqueue(wf, undefined);
+    await engine.drain();
+    const before = await engine.inspect(handle.runId);
+    expect(before?.status).toBe(outcome);
+
+    await engine.cancel(handle.runId);
+
+    expect(await engine.inspect(handle.runId)).toEqual(before!);
+    await engine.stop();
+  });
+
+  it("does not cascade cancellation from an already-terminal parent to its children", async () => {
+    const child = workflow({ name: "waiting-child" }, async (ctx) => ctx.waitFor("release"));
+    const parent = workflow({ name: "detached-parent" }, async (ctx) => {
+      await ctx.spawn(child, undefined, { detached: true });
+      return "parent-done";
+    });
+    const engine = createEngine({ storage: new MemoryStorage() });
+    await engine.start();
+    const handle = await engine.enqueue(parent, undefined);
+    await engine.drain();
+    const state = await engine.inspect(handle.runId);
+    expect(state?.status).toBe("completed");
+
+    await engine.cancel(handle.runId);
+
+    expect((await engine.inspect(handle.runId))?.status).toBe("completed");
+    expect((await engine.inspect(state!.children[0]!))?.status).toBe("waiting");
+    await engine.stop();
+  });
+
+  it("re-executes steps whose compensations already ran when the run is retried", async () => {
+    const events: string[] = [];
+    let fail = true;
+    const engine = createEngine({ storage: new MemoryStorage() });
+    const wf = workflow(async (ctx) => {
+      const hold = await ctx.step(() => {
+        events.push("hold");
+        return Promise.resolve("h1");
+      }, {
+        name: "hold",
+        compensate: async () => {
+          events.push("release");
+        },
+      });
+      return ctx.step(() => {
+        events.push("ship");
+        if (fail) throw new Error("ship failed");
+        return Promise.resolve(`shipped:${hold}`);
+      }, { name: "ship" });
+    });
+    await engine.start();
+    const handle = await engine.enqueue(wf, undefined);
+    await engine.drain();
+    expect(events).toEqual(["hold", "ship", "release"]);
+    fail = false;
+
+    await engine.retry(handle.runId, { fromStep: "ship" });
+    await engine.drain();
+
+    expect(events).toEqual(["hold", "ship", "release", "hold", "ship"]);
+    expect(await engine.inspect(handle.runId)).toEqual(expect.objectContaining({
+      status: "completed",
+      result: "shipped:h1",
+    }));
+    await engine.stop();
+  });
+
+  it("re-executes compensated steps for a retry without a step selector", async () => {
+    const events: string[] = [];
+    let fail = true;
+    const engine = createEngine({ storage: new MemoryStorage() });
+    const wf = workflow(async (ctx) => {
+      await ctx.step(() => {
+        events.push("hold");
+        return Promise.resolve("h1");
+      }, {
+        name: "hold",
+        compensate: async () => {
+          events.push("release");
+        },
+      });
+      return ctx.step(() => {
+        events.push("ship");
+        if (fail) throw new Error("ship failed");
+        return Promise.resolve("shipped");
+      }, { name: "ship" });
+    });
+    await engine.start();
+    const handle = await engine.enqueue(wf, undefined);
+    await engine.drain();
+    fail = false;
+
+    await engine.retry(handle.runId);
+    await engine.drain();
+
+    expect(events).toEqual(["hold", "ship", "release", "hold", "ship"]);
+    expect((await engine.inspect(handle.runId))?.status).toBe("completed");
+    await engine.stop();
+  });
 });

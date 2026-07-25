@@ -1,6 +1,6 @@
 {
   "name": "@nikhilverma/durably",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local-first durable execution for TypeScript",
   "license": "MIT",
   "author": "Nikhil Verma",

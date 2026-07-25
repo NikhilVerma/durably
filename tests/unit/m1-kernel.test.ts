@@ -265,6 +265,30 @@ describe("M1 kernel: steps and replay", () => {
     expect(result.steps[0]?.stashed).toBeUndefined();
   });
 
+  it("normalizes array holes to null so live and resumed values agree", async () => {
+    const wf = workflow(async (ctx) =>
+      ctx.step(() => Promise.resolve([1, , 3] as unknown as number[]), { name: "sparse" })
+    );
+    const te = testEngine();
+
+    const crashed = await te.run(wf, undefined, { crashAfter: "sparse" });
+    expect(crashed.steps[0]?.output).toEqual([1, null, 3]);
+    const done = await te.resume(crashed.runId);
+
+    expect(done.result).toEqual([1, null, 3]);
+  });
+
+  it("rejects an undefined property rather than silently dropping the key", async () => {
+    const wf = workflow(async (ctx) =>
+      ctx.step(() => Promise.resolve({ id: "x", nickname: undefined }), { name: "optional-field" })
+    );
+
+    const result = await testEngine().run(wf, undefined);
+    expect(result.status).toBe("failed");
+    expect(result.steps[0]?.error).toBeInstanceOf(SerializationError);
+    expect(result.steps[0]?.error.path).toMatch(/nickname/);
+  });
+
   it("rejects non-serializable loop snapshots at the iteration that produced them", async () => {
     const wf = workflow(async (ctx) =>
       ctx.loop({ turn: 0, value: "ok" as unknown }, async (state) => ({

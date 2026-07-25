@@ -196,7 +196,12 @@ const cloneSerializable = (
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.map((item, index) => cloneSerializable(item, pathFor(path, index), ancestors));
+      // Holes become null, matching JSON, so the live value and the value a
+      // resumed process reads back are the same shape.
+      return Array.from({ length: value.length }, (_item, index) =>
+        index in value
+          ? cloneSerializable(value[index], pathFor(path, index), ancestors)
+          : null);
     }
     if (Object.getPrototypeOf(value) !== Object.prototype) {
       throw new SerializationError(`class instance at ${path}`, { path });
@@ -231,15 +236,25 @@ const encodeDisk = (value: unknown): unknown => {
   return value;
 };
 
+/**
+ * Decoding must be idempotent: a state object can reach hydration already
+ * decoded (file adapters decode on read) or still encoded (adapters that hand
+ * back live objects). Live Date and Error instances are returned untouched
+ * because the generic object branch would otherwise flatten them to `{}`.
+ */
 const decodeDisk = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(decodeDisk);
+  if (value instanceof Date || value instanceof Error) return value;
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     if (record.__durably === "Date" && typeof record.value === "string") return new Date(record.value);
     if (record.__durably === "Error") {
-      const ErrorClass = errorClasses[String(record.name)] ?? Error;
+      const name = String(record.name ?? "Error");
+      const ErrorClass = errorClasses[name] ?? Error;
       const details = decodeDisk(record.fields) as ErrorDetails;
       const error = new ErrorClass(String(record.message ?? ""), details);
+      // A user-defined class decodes to Error; keep its reported name.
+      if (error.name !== name) error.name = name;
       if (typeof record.stack === "string") error.stack = record.stack;
       return error;
     }
@@ -723,6 +738,9 @@ interface InternalOp {
   signal?: string;
   timeoutAt?: number;
   payload?: unknown;
+  // Why the last delivered payload was refused, so an operator inspecting a
+  // still-waiting run can see that a signal arrived and did not satisfy it.
+  rejected?: string;
 }
 
 interface InternalLoop {
@@ -751,7 +769,9 @@ interface InternalRun {
   detachedChildren: string[];
   annotations: Record<string, JsonValue>;
   advisories: Advisory[];
-  waitingFor?: { signal: string; since: string; timeoutAt?: number } | undefined;
+  // `key` is the durable path of the parked waitFor. Signal routing must use it
+  // rather than the signal name, which a workflow may await more than once.
+  waitingFor?: { signal: string; since: string; timeoutAt?: number; key?: string } | undefined;
   wakeAt?: number | undefined;
   adoption?: { assertedCompatible: true; bodyHash: string } | undefined;
   priority: number;
@@ -773,6 +793,8 @@ interface InternalRun {
   cancelRequested: boolean;
   pauseRequested: boolean;
   execution?: Promise<void> | undefined;
+  leaseOwner?: string | undefined;
+  leaseCheckedAt?: number | undefined;
   listeners: Set<() => void>;
   advisoryListeners: Set<(advisory: Advisory) => void>;
   stderrCodes: Set<string>;
@@ -1089,7 +1111,9 @@ class EngineImpl implements Engine {
     this.clock = options.clock ?? new RealClock();
     this.concurrency = options.concurrency ?? 4;
     this.leaseMs = options.leaseMs ?? 2_000;
-    this.heartbeatMs = options.heartbeatMs ?? Math.max(100, Math.floor(this.leaseMs / 3));
+    // The heartbeat must always fit comfortably inside the lease, including for
+    // short leases, or the owner loses a lease it is still working under.
+    this.heartbeatMs = options.heartbeatMs ?? Math.max(10, Math.floor(this.leaseMs / 3));
     this.engineBudget = { ...(options.budget ?? {}) };
     this.hooks = options.hooks;
     this.testMode = options.testMode ?? false;
@@ -1535,7 +1559,10 @@ class EngineImpl implements Engine {
             return mismatch(`wait ${key} schema rejects its recorded payload`);
           }
         }
-        if (run.waitingFor?.signal === name) {
+        if (
+          run.waitingFor?.signal === name
+          && (run.waitingFor.key === undefined || run.waitingFor.key === key)
+        ) {
           const since = Date.parse(run.waitingFor.since);
           commitPolicyUpdates.push(() => {
             if (options.timeoutMs === undefined) {
@@ -1835,6 +1862,8 @@ class EngineImpl implements Engine {
       }
       run.fastStart = true;
     }
+    run.leaseOwner = this.owner;
+    run.leaseCheckedAt = this.clock.now();
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     if (!this.testMode) {
       heartbeat = setInterval(() => {
@@ -1849,6 +1878,8 @@ class EngineImpl implements Engine {
       if (!this.isTerminal(run.status)) await this.execute(run);
     } finally {
       if (heartbeat) clearInterval(heartbeat);
+      run.leaseOwner = undefined;
+      run.leaseCheckedAt = undefined;
       if (fileStorage) {
         fileStorage.releaseSync(run.runId, this.owner);
         run.fastStart = false;
@@ -1856,6 +1887,26 @@ class EngineImpl implements Engine {
         await this.storage.release?.(run.runId, this.owner);
       }
     }
+  }
+
+  /**
+   * Replace a diverged in-memory run with the durable truth. Used when this
+   * engine discovers another owner has taken the run over.
+   */
+  private async reloadFromStorage(run: InternalRun): Promise<void> {
+    const stored = this.storage instanceof FileStorage
+      ? this.storage.readStateSync(run.runId)
+      : (await this.storage.list()).find((item) => item.runId === run.runId)?.state;
+    if (!stored) return;
+    const latest = hydrateRun(stored as RunState & Record<string, unknown>);
+    latest.workflowDef = run.workflowDef;
+    latest.listeners = run.listeners;
+    latest.advisoryListeners = run.advisoryListeners;
+    latest.stderrCodes = run.stderrCodes;
+    latest.injector = run.injector;
+    latest.advisoriesSilent = run.advisoriesSilent;
+    latest.execution = run.execution;
+    Object.assign(run, latest);
   }
 
   private async execute(run: InternalRun): Promise<void> {
@@ -1888,6 +1939,12 @@ class EngineImpl implements Engine {
       if (error instanceof CrashSignal) {
         run.status = "crashed";
         await this.persist(run);
+        return;
+      }
+      if (error instanceof LeaseLostError) {
+        // Another owner is authoritative now. Drop this engine's divergent view
+        // without persisting anything and adopt the stored outcome.
+        await this.reloadFromStorage(run);
         return;
       }
       if (error instanceof CompleteSignal) {
@@ -2131,6 +2188,28 @@ class EngineImpl implements Engine {
   private contextFor(run: InternalRun, replay: boolean): WorkflowContext {
     const engine = this;
 
+    /**
+     * Re-assert the lease around effects. A process that stalls past its lease
+     * can have the run reclaimed underneath it; committing that work afterwards
+     * would overwrite the new owner's durable state.
+     */
+    const assertLeaseHeld = async (): Promise<void> => {
+      if (replay || engine.testMode || !run.leaseOwner) return;
+      const now = engine.clock.now();
+      const interval = Math.max(1, Math.floor(engine.leaseMs / 3));
+      if (now - (run.leaseCheckedAt ?? 0) < interval) return;
+      const held = await engine.storage.heartbeat(run.runId, {
+        owner: run.leaseOwner,
+        expiresAt: new Date(Date.now() + engine.leaseMs).toISOString(),
+      });
+      if (!held) {
+        throw new LeaseLostError(`run ${run.runId} was reclaimed by another owner`, {
+          runId: run.runId,
+        });
+      }
+      run.leaseCheckedAt = engine.clock.now();
+    };
+
     const step = async (
       fn: (context: {
         signal: AbortSignal;
@@ -2225,6 +2304,7 @@ class EngineImpl implements Engine {
       let lastError: unknown;
       for (let localAttempt = 1; localAttempt <= maxAttempts; localAttempt++) {
         if (run.cancelRequested) throw new RunCancelledError("run cancelled");
+        await assertLeaseHeld();
         record.status = "running";
         record.error = undefined;
         record.attempts++;
@@ -2293,6 +2373,8 @@ class EngineImpl implements Engine {
               ]);
           const raw = await attempted;
           settled = true;
+          // The attempt may have outlived the lease; refuse to commit if so.
+          await assertLeaseHeld();
           const ended = engine.clock.now();
           const attemptRecord: AttemptRecord = {
             attempt,
@@ -2332,6 +2414,9 @@ class EngineImpl implements Engine {
           return output;
         } catch (error) {
           if (error instanceof CrashSignal) throw error;
+          // Losing the lease is not a step failure: recording it would write
+          // over state this engine no longer owns.
+          if (error instanceof LeaseLostError) throw error;
           lastError = error;
           const ended = engine.clock.now();
           if (!record.attemptHistory.some((item) => item.attempt === attempt)) {
@@ -2439,6 +2524,7 @@ class EngineImpl implements Engine {
                 || error instanceof ParkSignal
                 || error instanceof PurityError
                 || error instanceof CompleteSignal
+                || error instanceof LeaseLostError
               ) {
                 fatal = error;
                 break;
@@ -2570,10 +2656,19 @@ class EngineImpl implements Engine {
           : (schemaOrOptions as { timeoutMs?: number } | undefined) ?? maybeOptions ?? {};
         let operation = run.ops[key];
         if (operation?.payload !== undefined) {
-          const payload = operation.payload;
-          operation.payload = undefined;
-          run.waitingFor = undefined;
-          return schemaValidate(schema, payload);
+          try {
+            // A wait's schema lives in the workflow body, so this is the only
+            // place every process can check a payload. The delivered value
+            // stays recorded so replaying returns it instead of parking again.
+            const delivered = await schemaValidate(schema, operation.payload);
+            run.waitingFor = undefined;
+            return delivered;
+          } catch (error) {
+            // A payload the wait rejects was never delivered. Discard it and
+            // stay parked so a corrected signal can still arrive.
+            operation.payload = undefined;
+            operation.rejected = asError(error).message;
+          }
         }
         if (operation?.timeoutAt !== undefined && engine.clock.now() >= operation.timeoutAt) {
           throw new StepTimeoutError(`waitFor ${name} timed out after ${options.timeoutMs}ms`, {
@@ -2593,6 +2688,7 @@ class EngineImpl implements Engine {
           signal: name,
           since: new Date(engine.clock.now()).toISOString(),
           ...(operation.timeoutAt !== undefined ? { timeoutAt: operation.timeoutAt } : {}),
+          key,
         };
         run.status = "waiting";
         if (options.timeoutMs === undefined) engine.observe(run, "WAITFOR_NO_TIMEOUT");
@@ -2657,6 +2753,14 @@ class EngineImpl implements Engine {
         const key = pathKey(path);
         if (run.ops[key] || replay) return;
         const cloned = cloneSerializable(amount) as Budget;
+        for (const kind of ["usd", "tokens", "units"] as BudgetKind[]) {
+          const charged = cloned[kind];
+          // Spend is monotonic: a refund would let a run slip back under a cap
+          // it has already crossed.
+          if (charged !== undefined && charged < 0) {
+            throw new DurablyError(`charge ${kind} must be a non-negative amount`, { kind });
+          }
+        }
         run.ops[key] = { kind: "charge", value: cloned };
         for (const kind of ["usd", "tokens", "units"] as BudgetKind[]) {
           const charged = cloned[kind] ?? 0;
@@ -2705,13 +2809,24 @@ class EngineImpl implements Engine {
       .map(stateOf);
   }
 
+  private parkedWait(run: InternalRun): InternalOp | undefined {
+    const waiting = run.waitingFor;
+    if (!waiting) return undefined;
+    const byKey = waiting.key === undefined ? undefined : run.ops[waiting.key];
+    if (byKey) return byKey.kind === "wait" ? byKey : undefined;
+    // States written before waits recorded their path fall back to the name.
+    return Object.values(run.ops).find((item) =>
+      item.kind === "wait" && item.signal === waiting.signal && item.payload === undefined
+    );
+  }
+
   async signal(runId: string, name: string, payload: unknown): Promise<void> {
     await this.start();
     await this.refreshRuns();
     const run = this.runs.get(runId);
     if (!run) throw new Error(`run ${runId} not found`);
-    const operation = Object.values(run.ops).find((item) => item.kind === "wait" && item.signal === name);
-    if (!operation || run.waitingFor?.signal !== name) return;
+    const operation = this.parkedWait(run);
+    if (!operation || operation.signal !== name || run.waitingFor?.signal !== name) return;
     const schema = run.signalSchemas.get(name);
     operation.payload = await schemaValidate(schema, cloneSerializable(payload));
     run.status = "pending";
@@ -2724,6 +2839,9 @@ class EngineImpl implements Engine {
     await this.start();
     const run = this.runs.get(runId);
     if (!run) return;
+    // A finished run is history: cancelling it must not rewrite its outcome or
+    // reach into children it already handed off.
+    if (this.isTerminal(run.status)) return;
     run.cancelRequested = true;
     for (const controller of run.activeControllers) {
       controller.abort(new RunCancelledError("run cancelled", { runId }));
@@ -2766,23 +2884,34 @@ class EngineImpl implements Engine {
     await this.start();
     const run = this.runs.get(runId);
     if (!run) throw new Error(`run ${runId} not found`);
+    // A retried step keeps its stash so it can resume partial work; a
+    // compensated one cannot, because that partial work was undone.
+    const invalidate = (step: InternalStep, discardStash: boolean): void => {
+      step.status = "running";
+      step.output = undefined;
+      step.error = undefined;
+      step.compensated = false;
+      step.compensationError = undefined;
+      if (discardStash) step.stashed = undefined;
+    };
     if (options.fromStep !== undefined) {
       const selected = run.steps.find((step) =>
         this.selectorMatches(run, options.fromStep, step.label, step.path)
       );
       if (!selected) throw new Error(`step selector did not match in ${runId}`);
       for (const step of run.steps) {
-        if (comparePaths(step.path, selected.path) >= 0) {
-          step.status = "running";
-          step.output = undefined;
-          step.error = undefined;
-          step.compensated = false;
-        }
+        if (comparePaths(step.path, selected.path) >= 0) invalidate(step, step.compensated === true);
       }
+    }
+    // A compensation undid its step's effect, so the recorded output no longer
+    // describes the world. Those steps must run again whatever the selector is.
+    for (const step of run.steps) {
+      if (step.compensated) invalidate(step, true);
     }
     run.status = "pending";
     run.error = undefined;
     run.rollbackPending = false;
+    run.rollbackIndex = -1;
     run.compensationError = undefined;
     await this.persist(run);
     this.schedule(run);
@@ -2890,6 +3019,8 @@ class EngineImpl implements Engine {
       return;
     }
     run.fastStart = true;
+    run.leaseOwner = this.owner;
+    run.leaseCheckedAt = this.clock.now();
     this.#active++;
     const heartbeat = setInterval(() => {
       void storage.heartbeat(run.runId, {
@@ -2900,6 +3031,8 @@ class EngineImpl implements Engine {
     heartbeat.unref?.();
     const execution = this.execute(run).finally(() => {
       clearInterval(heartbeat);
+      run.leaseOwner = undefined;
+      run.leaseCheckedAt = undefined;
       storage.releaseSync(run.runId, this.owner);
       run.fastStart = false;
       if (run.execution === execution) run.execution = undefined;
@@ -3111,9 +3244,7 @@ class EngineImpl implements Engine {
     if (!run) throw new Error(`run ${runId} not found`);
     if (run.status === "completed" || run.status === "cancelled") return this.testResult(run);
     if (run.status === "waiting") {
-      const operation = Object.values(run.ops).find((item) =>
-        item.kind === "wait" && item.signal === run.waitingFor?.signal
-      );
+      const operation = this.parkedWait(run);
       if (
         operation?.payload === undefined
         && (operation?.timeoutAt === undefined || this.clock.now() < operation.timeoutAt)
