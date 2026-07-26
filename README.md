@@ -1,6 +1,6 @@
 # durably
 
-[Website](https://nikhil-verma.com/durably/) · [Documentation](https://nikhil-verma.com/durably/docs/) · [npm](https://www.npmjs.com/package/@nikhilverma/durably)
+[Website](https://nikhil-verma.com/durably/) · [Documentation](https://nikhil-verma.com/durably/docs/) · [npm](https://www.npmjs.com/package/@nikhilverma/durably) · [Agent skill](./skills/)
 
 **Durable workflows for scripts and agents. One process, no server, no setup, no magic.**
 

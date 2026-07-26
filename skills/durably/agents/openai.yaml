@@ -1,0 +1,4 @@
+interface:
+  display_name: "durably"
+  short_description: "Write durable TypeScript workflows that resume after a crash"
+  default_prompt: "Use $durably to make this script resumable so a crash doesn't re-run the work I already paid for."
