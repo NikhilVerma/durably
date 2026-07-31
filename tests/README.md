@@ -21,9 +21,11 @@ This is the executable contract built before the library. No test is skipped or 
 | `unit/m8-ship-gates.test.ts` | CORE/EXTENDED tokenizer budgets and agent-facing registry |
 | `unit/m8-node-portability.test.ts` | package exports, ESM/CJS Node smoke, SQLite isolation, no Bun production imports |
 | `unit/m8-registry-contract.test.ts` | actual advisory/error registries, docs routes, implemented API-reference manifest |
+| `unit/m9-fanout-and-checkpoints.test.ts` | parked parents free their slot, fan-out advisory, checkpoint interval, log compaction |
 | `unit/m9-operator-ergonomics.test.ts` | JSON `undefined` semantics at the durable boundary, self-describing key conflicts, key lookup, `onStep` progress |
 | `integration/hero-workflow.test.ts` | README fan-out/fan-in story, flaky children, crash/resume, saga recovery |
 | `integration/readme-hero-process.test.ts` | literal file-backed hero command killed and rerun across real processes |
+| `integration/checkpoint-durability.test.ts` | SIGKILL mid-run, resume in a fresh process, re-execution bounded by `checkpointEvery` |
 | `integration/file-engine-cooperation.test.ts` | state/advisory parity, two-engine subscribe, two-process kill/reclaim, lease heartbeat and stale-owner protection, key conflicts |
 
 ## Commands

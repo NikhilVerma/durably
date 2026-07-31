@@ -26,8 +26,15 @@ const wf = workflow({ input: Schema, output?, name? }, fn)   // Standard Schema 
 await run(wf, input, options?) -> Output    // the workflow's value, always; never a wrapper
 ```
 
-`RunOptions`: `{ key?, fresh?, budget?, dir?, advisories?: 'silent', onAdvisory?: (a) => void,
-onStep?: (e: StepEvent) => void }`. Default storage directory is `./.durably`.
+`RunOptions`: `{ key?, fresh?, budget?, dir?, checkpointEvery?, advisories?: 'silent',
+onAdvisory?: (a) => void, onStep?: (e: StepEvent) => void }`. Default storage directory is
+`./.durably`.
+
+`checkpointEvery` bounds how many completed steps a crash may re-execute. A checkpoint rewrites
+the whole run state, so the default scales: every step up to 100 steps, then every one percent of
+the steps so far, capped at every hundredth. Pass `1` when steps cost money — that is the setting
+that makes "completed work is never re-billed" literally true at any run length. Also accepted by
+`enqueue` and `createEngine`.
 
 `StepEvent` = `{ runId, path, label, status, attempt, executions, ms?, error? }`, where `status` is
 `running | replayed | ok | retrying | failed`. It is the progress channel for a long run:
@@ -65,6 +72,7 @@ ctx.step(fn, options?) -> Promise<T>
              concurrencyLimit? = 1, uses? }
 
 ctx.parallel(thunks, { concurrency? }?) -> Promise<Result<T>[]>   // default: every thunk at once
+  // child runs are capped by the ENGINE's concurrency (default 4), not by this
 ctx.spawn(wf, input, { detached? }?) -> Promise<RunHandle<T>>
 ctx.spawnAll([[wf, input], …], { detached? }?) -> Promise<RunHandle[]>
 ctx.joinAll(handles) -> Promise<Result<T>[]>
@@ -164,6 +172,7 @@ const engine = createEngine({
   storage: new FileStorage('~/.myagent/durably'),
   resources: [openai],
   concurrency: 8,           // concurrent RUNS, default 4 — this is what throttles child fan-out
+  checkpointEvery: 1,       // bound crash loss to zero completed steps
   budget: { usd: 200 },        // fleet-wide; run budgets draw from it
   hooks: { onRunFailed: ({ runId, error }) => notify(error) },
   leaseMs, heartbeatMs,
@@ -178,7 +187,9 @@ Storage:
 
 - **`FileStorage`** (default) — one directory per run; events are length-prefixed,
   CRC-checksummed records, so a torn tail from a crash truncates cleanly instead of corrupting
-  the run. A per-run lockfile prevents interleaved writers after lease reclamation.
+  the run. A per-run lockfile prevents interleaved writers after lease reclamation. Each state
+  record embeds the whole run, so the log is compacted to its newest record past ~1 MB
+  (`new FileStorage(dir, { compactAboveBytes })`); a resume reads only that record.
 - **`MemoryStorage`** — tests and ephemeral work.
 - **`SqliteStorage`** from `@nikhilverma/durably/sqlite` — built on `node:sqlite` (Node ≥ 22.5,
   no native addon). Use it on network filesystems, on Windows without caveats, or when you want
@@ -225,6 +236,7 @@ any thrown `DurablyError`. `run()` also emits them to stderr once, or to `onAdvi
 | `WAITFOR_NO_TIMEOUT` | a wait with no `timeoutMs` | `waitFor` timeouts |
 | `SNAPSHOT_HEAVY` | loop state size × snapshot frequency | `snapshotEvery` |
 | `SLOW_STEP_NO_TIMEOUT` | a slow step with no `timeoutMs` | timeouts |
+| `CONCURRENCY_CAPPED` | more children spawned than the engine runs at once | `createEngine({ concurrency })` |
 
 Codes are deduplicated per run, emitted once per severity crossing, capped at 10 active per run,
 and silenced entirely with `advisories: 'silent'`.
@@ -263,5 +275,7 @@ new executions. Crash selectors accept the same selector forms as step operation
    poll it with `sleep` inside a loop. Below that ceiling the same shape applies: batch the work
    into a few hundred durable steps and keep per-item idempotency in your own ledger inside each
    step. durably owns the coarse checkpoints, you own the fine ones.
-5. No distributed execution, no job queue, no persistent cron, no dashboards, no workflow
+5. A step is the unit of durability: one killed at 99% yields nothing and re-runs whole. `stash`
+   is the hook for progress inside an attempt; nothing else checkpoints mid-step.
+6. No distributed execution, no job queue, no persistent cron, no dashboards, no workflow
    versioning APIs. These are refusals, not roadmap gaps.

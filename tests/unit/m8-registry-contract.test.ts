@@ -29,6 +29,7 @@ describe("M8 actual hint and documentation registries", () => {
     expect(new Set(Object.keys(advisoryRegistry))).toEqual(new Set([
       "LOOP_SUGGESTED", "FANOUT_CEILING", "RETRY_STORM", "STASH_SUGGESTED",
       "BUDGET_NEAR", "WAITFOR_NO_TIMEOUT", "SNAPSHOT_HEAVY", "SLOW_STEP_NO_TIMEOUT",
+      "CONCURRENCY_CAPPED",
     ]));
   });
 

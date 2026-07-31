@@ -184,7 +184,7 @@ const outcomes = await ctx.joinAll(kids)
 
 Both return `Result<T>[]` = `{ ok: true, value } | { ok: false, error }` — failures are typed values, never swallowed. Cancelling a parent cancels children by default (`{ detached: true }` to opt out).
 
-Two different concurrency knobs, two different defaults: `ctx.parallel` runs every thunk at once unless you pass `{ concurrency }`, while an engine runs **4 runs** at a time unless you pass `createEngine({ concurrency })` — that second one is what throttles `spawnAll` children.
+Two different concurrency knobs, two different defaults: `ctx.parallel` runs every thunk at once unless you pass `{ concurrency }`, while an engine runs **4 runs** at a time unless you pass `createEngine({ concurrency })` — that second one is what throttles `spawnAll` children. Spawn more children than the engine will run at once and it says so, with the numbers, through `CONCURRENCY_CAPPED`. A parent waiting in `joinAll` is parked, not executing, so it gives its slot back to its own children.
 
 ### Keyed concurrency
 
@@ -355,7 +355,7 @@ durably owns the mechanics — `stash(v)` persists to the run log, survives cras
 .durably/runs/01J8ZKQ4/
 ├── state.json      # where is it NOW — one cat answers it
 └── events.log      # what happened — length-prefixed, checksummed NDJSON records
-                    # (chunked + compacted internally; torn tails self-heal on read)
+                    # (compacted past ~1 MB to the newest state; torn tails self-heal)
 ```
 
 ```bash
@@ -498,15 +498,20 @@ RESOURCES
 
 ENGINES + STORAGE
   createEngine({storage?,resources?,concurrency?,budget?,hooks?})
-  concurrency caps concurrent RUNS and defaults to 4 — raise it for child fan-out.
+  concurrency caps concurrent RUNS and defaults to 4 — raise it for child fan-out;
+  spawning more children than that fires CONCURRENCY_CAPPED. A run parked on its
+  children frees its slot, so parents can never starve their own children.
   ctx.parallel defaults to running every thunk at once; pass {concurrency} to cap.
+  checkpointEvery (run/enqueue/engine) bounds how many completed steps a crash
+  may re-execute: 1 up to 200 steps, then 10. Set 1 when steps cost money.
   FileStorage(dir); MemoryStorage(); SqliteStorage(path) from @nikhilverma/durably/sqlite.
   StorageAdapter has init,createRun,append,read,claim,heartbeat,list; append must be
   atomic and ordered per run.
 
 ADVISORIES
   LOOP_SUGGESTED, FANOUT_CEILING, RETRY_STORM, STASH_SUGGESTED, BUDGET_NEAR,
-  WAITFOR_NO_TIMEOUT, SNAPSHOT_HEAVY, SLOW_STEP_NO_TIMEOUT. Dedupe by code, emit
+  WAITFOR_NO_TIMEOUT, SNAPSHOT_HEAVY, SLOW_STEP_NO_TIMEOUT, CONCURRENCY_CAPPED.
+  Dedupe by code, emit
   once per severity crossing, cap 10 active per run, stderr once, or silence with
   advisories:'silent'.
 ````
@@ -599,6 +604,9 @@ These are the tradeoffs that matter in practice:
 6. **`loop` state must be serializable and reasonably small.** Snapshots are the resume path; a 50 MB messages array snapshotted every turn is your I/O bill. Compact your own history (you control the reducer) or raise `snapshotEvery`.
 7. **The durable boundary is JSON plus `Date`, with JSON's `undefined` rules.** An undefined property is dropped and an undefined array element becomes `null`, exactly as `JSON.stringify` would — an optional field written `field?: T` must not fail a run before it starts. Everything JSON genuinely cannot express (`bigint`, `symbol`, functions, class instances, `NaN`/`Infinity`, cycles) still throws `SerializationError` with the offending path, at the boundary rather than six hours into a resume.
 8. **Fan-out has a ceiling — know where durably taps out.** In-run `parallel` is comfortable to ~10⁴ steps. Child runs: ~10³–10⁴ on `FileStorage` (directory entries, fd churn, `list()` scans become the limit before the model does), ~10⁵ on `SqliteStorage`. Past ~10⁵ items, reach for your provider's Batch API — and that's a recipe, not a defeat: submit the batch as one step, poll with `sleep` + a step in a loop, and durably babysits the batch job instead of impersonating one. The same shape works below the ceiling: batch the units of work into a few hundred durable steps and keep per-unit idempotency in your own ledger (a SQLite table, a key-value file) inside each step. durably owns the coarse checkpoints; you own the fine ones.
+
+9. **Checkpoints cost, and so does skipping them.** A checkpoint rewrites the whole run state, so checkpointing every one of ten thousand steps is quadratic I/O — and skipping one means whatever it would have recorded re-executes after a crash. durably scales the interval with the run: every step up to a hundred, then every one percent of the steps so far, capped at every hundredth. A crash therefore costs at most one percent of a run's completed work. When steps cost money, say so — `run(wf, input, { checkpointEvery: 1 })`, also available on `enqueue` and `createEngine` — and pay the I/O deliberately. The event log itself is compacted past ~1 MB to the newest state record, so it stops growing with the square of the step count.
+10. **A long step is not checkpointed from the inside — unless you stash.** durably's unit of durability is the step: a step killed at 99% yields nothing and re-runs whole. `stash(v)` / `stashed` is the hook for the other 99% — persist partial progress inside the attempt and pick it up on the next one. `STASH_SUGGESTED` fires when a step over 30 seconds restarts from zero without it.
 
 ---
 

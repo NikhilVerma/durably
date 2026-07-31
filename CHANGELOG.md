@@ -7,6 +7,47 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-31
+
+Second round of field feedback from the same 449-batch harvest, after measuring
+what the report described. Two of the three findings were worse than reported.
+
+### Fixed
+
+- **A run waiting on its children no longer holds an execution slot.** `joinAll`
+  blocked inline while still counted against the engine's concurrency cap, so a
+  parent starved its own children: eight children under the default cap of four
+  ran three at a time, and four parents each awaiting one child deadlocked the
+  engine permanently. A parked parent now returns its slot and reclaims it on
+  resume.
+- **The event log no longer grows with the square of the step count.** Every
+  state record embeds the whole run, so a 200-step run wrote 9.2 MB of repeated
+  states. `FileStorage` now compacts the log to its newest state record past
+  1 MB — configurable with `new FileStorage(dir, { compactAboveBytes })`. The
+  same 200-step run writes 45 KB; a 1,600-step run went from 15.2 MB to 727 KB.
+- **A crash no longer discards up to 99 completed steps.** The mitigation for
+  the growth above was to stop checkpointing past 200 steps except every
+  hundredth, which silently broke the promise that completed work is never
+  re-executed: SIGKILL after step 250 of 300 re-ran 51 already-completed steps.
+  The interval now scales with the run — every step up to 100, then every one
+  percent of the steps so far, capped at every hundredth — bounding the loss at
+  one percent of a run's completed work.
+
+### Added
+
+- `checkpointEvery` on `RunOptions`, `EnqueueOptions`, and `EngineOptions`.
+  `checkpointEvery: 1` makes "completed work is never re-billed" literally true
+  at any run length, at the cost of an O(state) write per step.
+- `CONCURRENCY_CAPPED` advisory, fired when a fan-out is wider than the engine
+  will run at once, carrying both numbers and naming
+  `createEngine({ concurrency })`.
+
+### Documentation
+
+- The step is the unit of durability: a step killed at 99% yields nothing and
+  re-runs whole, and `stash` is the only hook for progress inside an attempt.
+- The event log's compaction claim is now accurate rather than aspirational.
+
 ## [0.4.0] - 2026-07-31
 
 Field feedback from a 449-batch, 448k-image harvest built on 0.3.0. Every change

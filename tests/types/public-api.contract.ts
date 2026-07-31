@@ -64,6 +64,7 @@ expectType<
   | "WAITFOR_NO_TIMEOUT"
   | "SNAPSHOT_HEAVY"
   | "SLOW_STEP_NO_TIMEOUT"
+  | "CONCURRENCY_CAPPED"
 >(advisory.code);
 expectType<"info" | "warn">(advisory.level);
 expectType<string>(advisory.msg);
@@ -92,6 +93,7 @@ await run(typed, { id: "abc" }, {
   fresh: true,
   budget: { usd: 5, tokens: 10_000, units: 12 },
   dir: "/tmp/durably",
+  checkpointEvery: 1,
   onAdvisory: (advisory) => {
     expectType<Advisory>(advisory);
   },
