@@ -48,6 +48,8 @@ import type {
   RunStatus,
   Selector,
   StandardSchemaV1,
+  StepEvent,
+  StepObserverOptions,
   StorageAdapter,
   StorageListOptions,
   StoredRun,
@@ -139,7 +141,17 @@ export class CircuitOpenError extends DurablyError {
     this.resource = typeof details.resource === "string" ? details.resource : undefined;
   }
 }
-export class KeyConflictError extends DurablyError {}
+export class KeyConflictError extends DurablyError {
+  key: string | undefined;
+  boundInput: unknown;
+  input: unknown;
+  constructor(message = "key is already bound to another input", details: ErrorDetails = {}) {
+    super(message, details);
+    this.key = typeof details.key === "string" ? details.key : undefined;
+    this.boundInput = details.boundInput;
+    this.input = details.input;
+  }
+}
 export class RunCancelledError extends DurablyError {}
 export class LeaseLostError extends DurablyError {}
 
@@ -196,10 +208,10 @@ const cloneSerializable = (
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      // Holes become null, matching JSON, so the live value and the value a
-      // resumed process reads back are the same shape.
+      // Holes and explicit undefined both become null, matching JSON, so the
+      // live value and the value a resumed process reads back are the same shape.
       return Array.from({ length: value.length }, (_item, index) =>
-        index in value
+        index in value && value[index] !== undefined
           ? cloneSerializable(value[index], pathFor(path, index), ancestors)
           : null);
     }
@@ -208,6 +220,10 @@ const cloneSerializable = (
     }
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
+      // An optional field written as `undefined` and an absent one are the same
+      // value to JSON, so they must be the same value here too — otherwise the
+      // ordinary `field?: T` idiom fails before a run even starts.
+      if (item === undefined) continue;
       result[key] = cloneSerializable(item, pathFor(path, key), ancestors);
     }
     return result;
@@ -279,6 +295,28 @@ const stableValue = (value: unknown): unknown => {
 const stableStringify = (value: unknown): string =>
   JSON.stringify(stableValue(value)) ?? "undefined";
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
+
+const describeInput = (value: unknown): string => {
+  const text = stableStringify(value);
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+};
+
+/**
+ * A key conflict is only actionable if it says what conflicts: naming the bound
+ * run and both inputs turns "go read state.json" into a decision the caller can
+ * make from the message alone.
+ */
+const keyConflict = (
+  key: string,
+  bound: { runId: string; input: unknown },
+  input: unknown,
+): KeyConflictError =>
+  new KeyConflictError(
+    `key ${key} is bound to run ${bound.runId} with input ${describeInput(bound.input)}, not ${
+      describeInput(input)
+    }`,
+    { key, runId: bound.runId, boundInput: bound.input, input },
+  );
 const normalizeSource = (source: string): string => source.replace(/\s+/g, " ").trim();
 
 const workflowInternal = Symbol("durably.workflow");
@@ -797,6 +835,7 @@ interface InternalRun {
   leaseCheckedAt?: number | undefined;
   listeners: Set<() => void>;
   advisoryListeners: Set<(advisory: Advisory) => void>;
+  stepListeners: Set<(event: StepEvent) => void>;
   stderrCodes: Set<string>;
   advisoriesSilent: boolean;
   fastStart: boolean;
@@ -995,6 +1034,7 @@ const hydrateRun = (stateValue: RunState & Record<string, unknown>): InternalRun
     pauseRequested: false,
     listeners: new Set(),
     advisoryListeners: new Set(),
+    stepListeners: new Set(),
     stderrCodes: new Set(),
     advisoriesSilent: false,
     fastStart: false,
@@ -1171,10 +1211,27 @@ class EngineImpl implements Engine {
         incoming.workflowDef = current.workflowDef ?? workflowRegistry.get(incoming.bodyHash);
         incoming.listeners = current.listeners;
         incoming.advisoryListeners = current.advisoryListeners;
+        incoming.stepListeners = current.stepListeners;
         incoming.stderrCodes = current.stderrCodes;
         incoming.injector = current.injector;
         incoming.advisoriesSilent = current.advisoriesSilent;
         this.runs.set(item.runId, incoming);
+      }
+    }
+  }
+
+  /**
+   * Progress is an observation, never a control point: a listener that throws
+   * must not fail work the run has already done.
+   */
+  emitStep(run: InternalRun, event: Omit<StepEvent, "runId">): void {
+    if (run.stepListeners.size === 0) return;
+    const payload: StepEvent = { runId: run.runId, ...event };
+    for (const listener of run.stepListeners) {
+      try {
+        listener(payload);
+      } catch {
+        // observer failures are not run failures
       }
     }
   }
@@ -1293,6 +1350,7 @@ class EngineImpl implements Engine {
       pauseRequested: false,
       listeners: new Set(),
       advisoryListeners: new Set(),
+      stepListeners: new Set(),
       stderrCodes: new Set(),
       advisoriesSilent: options.advisories === "silent",
       fastStart: false,
@@ -1695,14 +1753,14 @@ class EngineImpl implements Engine {
       if (workflowIdentity !== undefined) {
         existing = keyedCandidates[0];
         if (existing && existing.inputHash !== inputHash) {
-          throw new KeyConflictError(`key ${options.key} is already bound to another input`);
+          throw keyConflict(options.key, existing, input);
         }
       } else {
         existing = keyedCandidates.find((run) =>
           run.bodyHash === definition[workflowInternal].bodyHash
         );
         if (existing && existing.inputHash !== inputHash) {
-          throw new KeyConflictError(`key ${options.key} is already bound to another input`);
+          throw keyConflict(options.key, existing, input);
         }
         if (!existing) {
           for (const candidate of keyedCandidates.filter((run) =>
@@ -1854,6 +1912,7 @@ class EngineImpl implements Engine {
           latest.workflowDef = run.workflowDef ?? workflowRegistry.get(latest.bodyHash);
           latest.listeners = run.listeners;
           latest.advisoryListeners = run.advisoryListeners;
+          latest.stepListeners = run.stepListeners;
           latest.stderrCodes = run.stderrCodes;
           latest.injector = run.injector;
           latest.advisoriesSilent = run.advisoriesSilent;
@@ -1902,6 +1961,7 @@ class EngineImpl implements Engine {
     latest.workflowDef = run.workflowDef;
     latest.listeners = run.listeners;
     latest.advisoryListeners = run.advisoryListeners;
+    latest.stepListeners = run.stepListeners;
     latest.stderrCodes = run.stderrCodes;
     latest.injector = run.injector;
     latest.advisoriesSilent = run.advisoriesSilent;
@@ -2266,7 +2326,18 @@ class EngineImpl implements Engine {
         record.compensate = options.compensate;
         record.compensationHash = functionHash(options.compensate);
         try {
-          return options.schema ? await schemaValidate(options.schema, record.output) : record.output;
+          const replayed = options.schema
+            ? await schemaValidate(options.schema, record.output)
+            : record.output;
+          engine.emitStep(run, {
+            path,
+            label,
+            status: "replayed",
+            attempt: record.attempts,
+            executions: record.executions,
+            ...(record.ms !== undefined ? { ms: record.ms } : {}),
+          });
+          return replayed;
         } catch (error) {
           record.status = "failed";
           record.error = engine.attachError(run, error);
@@ -2312,6 +2383,13 @@ class EngineImpl implements Engine {
         const attempt = record.attempts;
         const started = engine.clock.now();
         record.startedAt = new Date(started).toISOString();
+        engine.emitStep(run, {
+          path,
+          label,
+          status: "running",
+          attempt,
+          executions: record.executions,
+        });
         if (run.fastStart || engine.testMode || engine.storage instanceof MemoryStorage) {
           void engine.persist(run);
         }
@@ -2398,6 +2476,14 @@ class EngineImpl implements Engine {
           record.status = "ok";
           record.error = undefined;
           record.stashed = undefined;
+          engine.emitStep(run, {
+            path,
+            label,
+            status: "ok",
+            attempt,
+            executions: record.executions,
+            ms: attemptRecord.ms,
+          });
           if (options.uses) await acquiredResource.success();
           run.accumulator?.retrySucceeded({ runId: run.runId, path });
           const completedSteps = run.steps.filter((item) => item.status === "ok").length;
@@ -2436,9 +2522,27 @@ class EngineImpl implements Engine {
           run.advisories = accumulator.active();
           if (localAttempt >= maxAttempts) {
             record.status = "failed";
+            engine.emitStep(run, {
+              path,
+              label,
+              status: "failed",
+              attempt,
+              executions: record.executions,
+              ms: record.ms,
+              error: record.error,
+            });
             await engine.persist(run);
             throw record.error;
           }
+          engine.emitStep(run, {
+            path,
+            label,
+            status: "retrying",
+            attempt,
+            executions: record.executions,
+            ms: record.ms,
+            error: record.error,
+          });
           if (run.fastStart || engine.testMode || engine.storage instanceof MemoryStorage) {
             void engine.persist(run);
           }
@@ -2803,6 +2907,7 @@ class EngineImpl implements Engine {
       .filter((run) =>
         (!options.status || run.status === options.status)
         && (!options.workflow || run.workflow === options.workflow)
+        && (options.key === undefined || run.key === options.key)
       )
       .sort((left, right) => left.createdAt - right.createdAt)
       .slice(0, options.limit)
@@ -2999,6 +3104,11 @@ class EngineImpl implements Engine {
       run.advisoryListeners.add(options.onAdvisory);
       for (const advisory of run.advisories) options.onAdvisory({ ...advisory });
     }
+    this.attachStepObserver(run, options);
+  }
+
+  private attachStepObserver(run: InternalRun, options: StepObserverOptions): void {
+    if (options.onStep) run.stepListeners.add(options.onStep);
   }
 
   private directResult<Output>(run: InternalRun): Promise<Output> {
@@ -3104,9 +3214,7 @@ class EngineImpl implements Engine {
     if (!options.fresh && options.key !== undefined) {
       existing = candidates.find((run) => run.key === options.key);
       if (existing && existing.inputHash !== inputHash) {
-        return Promise.reject(
-          new KeyConflictError(`key ${options.key} is already bound to another input`),
-        );
+        return Promise.reject(keyConflict(options.key, existing, input));
       }
     } else if (!options.fresh) {
       existing = candidates.find((run) =>
@@ -3190,6 +3298,7 @@ class EngineImpl implements Engine {
       run.advisoryListeners.add(options.onAdvisory);
       for (const advisory of run.advisories) options.onAdvisory({ ...advisory });
     }
+    this.attachStepObserver(run, options);
     this.schedule(run);
     await this.waitForSettled(run);
     if (run.status === "completed") return run.result as Output;
@@ -3233,29 +3342,40 @@ class EngineImpl implements Engine {
       crashInStep: options.crashInStep,
       used: false,
     };
+    this.attachStepObserver(run, options);
     this.runs.set(run.runId, run);
     void this.storage.createRun({ runId: run.runId, state: stateOf(run) });
     await this.execute(run);
     return this.testResult(run) as TestRunResult<Output>;
   }
 
-  async testResume(runId: string): Promise<TestRunResult<unknown>> {
+  async testResume(
+    runId: string,
+    options: StepObserverOptions = {},
+  ): Promise<TestRunResult<unknown>> {
     const run = this.runs.get(runId);
     if (!run) throw new Error(`run ${runId} not found`);
-    if (run.status === "completed" || run.status === "cancelled") return this.testResult(run);
-    if (run.status === "waiting") {
-      const operation = this.parkedWait(run);
-      if (
-        operation?.payload === undefined
-        && (operation?.timeoutAt === undefined || this.clock.now() < operation.timeoutAt)
-      ) return this.testResult(run);
-    }
-    if (run.status === "sleeping" && (run.wakeAt ?? Number.POSITIVE_INFINITY) > this.clock.now()) {
+    // A resume observer watches this resume only; leaving it attached would
+    // make a later resume report progress to a caller that stopped asking.
+    this.attachStepObserver(run, options);
+    try {
+      if (run.status === "completed" || run.status === "cancelled") return this.testResult(run);
+      if (run.status === "waiting") {
+        const operation = this.parkedWait(run);
+        if (
+          operation?.payload === undefined
+          && (operation?.timeoutAt === undefined || this.clock.now() < operation.timeoutAt)
+        ) return this.testResult(run);
+      }
+      if (run.status === "sleeping" && (run.wakeAt ?? Number.POSITIVE_INFINITY) > this.clock.now()) {
+        return this.testResult(run);
+      }
+      run.status = "pending";
+      await this.execute(run);
       return this.testResult(run);
+    } finally {
+      if (options.onStep) run.stepListeners.delete(options.onStep);
     }
-    run.status = "pending";
-    await this.execute(run);
-    return this.testResult(run);
   }
 
   testResult(run: InternalRun): TestRunResult<unknown> {
@@ -3325,7 +3445,7 @@ export const testEngine = (): TestEngine => {
   return {
     clock,
     run: (workflowValue, input, options = {}) => engine.testRun(workflowValue, input, options),
-    resume: (runId) => engine.testResume(runId),
+    resume: (runId, options) => engine.testResume(runId, options),
     signal: (runId, name, payload) => engine.signal(runId, name, payload),
   };
 };

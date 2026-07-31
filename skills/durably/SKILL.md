@@ -79,13 +79,15 @@ result. If the callback params are already typed, `workflow(fn)` infers both.
 
    | Survives | Rejected with `SerializationError` |
    | --- | --- |
-   | strings, booleans, finite numbers, `null` | `Infinity`, `NaN`, `undefined` as a property value |
+   | strings, booleans, finite numbers, `null` | `Infinity`, `NaN` |
    | valid `Date` objects | `bigint`, `symbol`, functions |
-   | plain objects and arrays (holes become `null`) | class instances — `Map`, `Set`, `URL`, `Error`, your own classes |
-   | | cyclic references |
+   | plain objects and arrays | class instances — `Map`, `Set`, `URL`, `Error`, your own classes |
+   | `undefined`, normalized exactly as `JSON.stringify` does | cyclic references |
 
    Return plain data. Convert a `Map` to an object and a `URL` to a string at the step boundary,
-   not two steps later where the failure reads as a mystery.
+   not two steps later where the failure reads as a mystery. `undefined` follows JSON: an
+   undefined property is dropped, an undefined array element becomes `null`, so an optional
+   `field?: T` is safe to pass to `run()` and hashes the same as an absent one.
 
 ## Pick the primitive
 
@@ -98,10 +100,17 @@ result. If the callback params are already typed, `workflow(fn)` infers both.
 | Progress *inside* one long step (a stream, a partial turn) | the step's `stash(v)` / `stashed` |
 | Human approval, or an external event | `ctx.waitFor(name, schema?, { timeoutMs })`, released by `durably.signal(runId, name, payload)` |
 | Wait for wall-clock time | `ctx.sleep(ms)` / `ctx.sleepUntil(date)` |
+| Watch a long run's progress from outside | `run(wf, input, { onStep })` |
 | Undo completed work when a later step fails | `compensate` on the step that did it |
 
 `parallel` and `joinAll` return `Result<T>[]` = `{ ok: true, value } | { ok: false, error }`.
 Failures are values, never swallowed — handle them, or use the exported `isOk` / `partition`.
+Never pass that array on as if it were `T[]`.
+
+`ctx.parallel` runs every thunk at once unless given `{ concurrency }`; an engine runs 4 *runs*
+at a time unless given `createEngine({ concurrency })`, and that is what throttles `spawnAll`.
+Past ~10⁴ items, batch them into a few hundred steps and keep per-item idempotency in your own
+ledger inside each step.
 
 Reach for `ctx.loop` past a few hundred iterations. Plain step replay holds every prior output
 in memory and re-runs the pure code each time; `loop` snapshots state so resume is O(1). Keep
@@ -162,7 +171,10 @@ grep -c . .durably/runs/<runId>/events.log
 ```
 
 `durably.inspect(runId)` returns the identical object; `durably.list({ status: 'failed' })` is
-the dead-letter queue. Read `status` first:
+the dead-letter queue; `durably.list({ key })` finds the run behind the key you chose, which is
+the only name a human remembers. While a run is still going, `run(wf, input, { onStep })` streams
+`{ label, status, attempt, ms }` — `replayed` means it came from the log, `retrying` is what makes
+a five-minute retry loop distinguishable from a slow step. Read `status` first:
 
 | `status` | What it means | Move |
 | --- | --- | --- |
@@ -177,6 +189,10 @@ Before proposing a fix, read `advisories[]` and the error's `hint` and `docs`. E
 (`LOOP_SUGGESTED`, `FANOUT_CEILING`, `RETRY_STORM`, `STASH_SUGGESTED`, `BUDGET_NEAR`,
 `WAITFOR_NO_TIMEOUT`, `SNAPSHOT_HEAVY`, `SLOW_STEP_NO_TIMEOUT`) each name an implemented
 primitive to switch to. Do not invent a diagnosis the run already printed.
+
+A `KeyConflictError` is self-describing: it names the run holding the key and both inputs
+(`key`, `runId`, `boundInput`, `input`), so decide from the message whether the change was
+meaningful — reuse the bound input, pick a new key, or pass `{ fresh: true }`.
 
 Note what re-running a command does, which surprises people: an **unfinished** run resumes, a
 **failed** run resumes from the failed step (re-running *is* the retry — a permanently bad input

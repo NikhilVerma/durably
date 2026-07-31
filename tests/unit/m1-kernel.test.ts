@@ -278,15 +278,14 @@ describe("M1 kernel: steps and replay", () => {
     expect(done.result).toEqual([1, null, 3]);
   });
 
-  it("rejects an undefined property rather than silently dropping the key", async () => {
+  it("drops an undefined property the way JSON.stringify does", async () => {
     const wf = workflow(async (ctx) =>
       ctx.step(() => Promise.resolve({ id: "x", nickname: undefined }), { name: "optional-field" })
     );
 
     const result = await testEngine().run(wf, undefined);
-    expect(result.status).toBe("failed");
-    expect(result.steps[0]?.error).toBeInstanceOf(SerializationError);
-    expect(result.steps[0]?.error.path).toMatch(/nickname/);
+    expect(result.status).toBe("completed");
+    expect(result.steps[0]?.output).toEqual({ id: "x" });
   });
 
   it("rejects non-serializable loop snapshots at the iteration that produced them", async () => {

@@ -23,6 +23,8 @@ import {
   type Result,
   type Advisory,
   type RunHandle,
+  type StepEvent,
+  type StepEventStatus,
   type Selector,
   type StandardSchemaV1,
   type StorageAdapter,
@@ -93,7 +95,24 @@ await run(typed, { id: "abc" }, {
   onAdvisory: (advisory) => {
     expectType<Advisory>(advisory);
   },
+  onStep: (event) => {
+    expectType<StepEvent>(event);
+    expectType<string>(event.label);
+    expectType<readonly number[]>(event.path);
+    expectType<StepEventStatus>(event.status);
+    expectType<number>(event.attempt);
+    expectType<number | undefined>(event.ms);
+  },
 });
+
+await durably.list({ key: "customer:abc" });
+expectType<string | undefined>((await durably.list({ key: "customer:abc" }))[0]?.key);
+
+// @ts-expect-error a step event status is a closed vocabulary
+const badStatus: StepEventStatus = "cached";
+void badStatus;
+
+await testEngine().resume("run-1", { onStep: (event) => expectType<StepEvent>(event) });
 
 type User = { id: string; role: "admin" | "member" };
 const UserSchema = {

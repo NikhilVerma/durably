@@ -184,6 +184,8 @@ const outcomes = await ctx.joinAll(kids)
 
 Both return `Result<T>[]` = `{ ok: true, value } | { ok: false, error }` — failures are typed values, never swallowed. Cancelling a parent cancels children by default (`{ detached: true }` to opt out).
 
+Two different concurrency knobs, two different defaults: `ctx.parallel` runs every thunk at once unless you pass `{ concurrency }`, while an engine runs **4 runs** at a time unless you pass `createEngine({ concurrency })` — that second one is what throttles `spawnAll` children.
+
 ### Keyed concurrency
 
 ```ts
@@ -382,7 +384,22 @@ $ cat .durably/runs/01J8ZKQ4/state.json
 }
 ```
 
-`durably.inspect(runId)` returns the identical object programmatically. That file is the answer to "where is my workflow" — for you, and for the agent you send to find out.
+`durably.inspect(runId)` returns the identical object programmatically. That file is the answer to "where is my workflow" — for you, and for the agent you send to find out. `durably.list({ key: 'nightly-harvest' })` goes the other way: from the key you chose to the run holding it.
+
+For a live view while a long run is still going, pass `onStep` — the progress channel that survives replay, unlike a `console.log` inside the workflow body:
+
+```ts
+import { run } from '@nikhilverma/durably'
+
+await run(digest, input, {
+  key: 'nightly-harvest',
+  onStep: ({ label, status, attempt, ms }) => {
+    if (status !== 'running') console.log(`${label} ${status} attempt ${attempt} ${ms ?? 0}ms`)
+  },
+})
+```
+
+`status` is `running`, `replayed` (returned from the log, never re-executed), `ok`, `retrying`, or `failed` — so a step quietly burning five minutes of retries looks different from a slow one. The callback observes; a listener that throws never fails the run.
 
 ---
 
@@ -404,7 +421,10 @@ DEFINE + RUN
   const wf = workflow<Input>()(async (ctx, input) => result)
   const wf = workflow({ input?, output?, name? }, fn)      // Standard Schema
   await run(wf, input, {key?, fresh?, budget?, dir?, advisories?,
-                        onAdvisory?: (a: Advisory)=>void}) -> result
+                        onAdvisory?: (a: Advisory)=>void,
+                        onStep?: (e: StepEvent)=>void}) -> result
+    StepEvent {runId,path,label,status,attempt,executions,ms?,error?};
+    status: running|replayed|ok|retrying|failed. Progress without tailing the log.
     Returns your workflow value directly, always; never a metadata wrapper.
   Candidate identity is (workflow,inputHash), or (workflow,key); bodyHash is the
   compatibility fast path and changed bodies must match recorded durable paths:
@@ -423,7 +443,8 @@ CTX
 
 DEFAULT ENGINE  import { durably } from '@nikhilverma/durably' // lazy, ./.durably
   enqueue(wf,input,{key?,priority?,delayMs?,budget?}) -> handle
-  inspect(runId) -> state|null; list({status?,workflow?,limit?})
+  inspect(runId) -> state|null; list({status?,workflow?,key?,limit?})
+    list({key}) finds the run you named; state carries key, so key -> runId -> dir.
   retry(runId,{fromStep?}); restart(runId); cancel(runId)
 
 ERRORS extend DurablyError: ValidationError, StepTimeoutError, PurityError,
@@ -439,6 +460,11 @@ TEST  const te = testEngine()                        // memory + fake clock
   te.run(wf,input,{crashAfter?,crashInStep?,budget?,advisories?})
     -> {runId,status,result,steps,advisories}
   te.resume(runId); te.signal(runId,name,payload); te.clock.advance(ms)
+
+DATA: inputs, step outputs, loop state, and results cross the disk as JSON+Date.
+undefined follows JSON.stringify: an undefined property is dropped, an undefined
+array element becomes null. bigint, symbol, functions, class instances (Map, Set,
+URL, Error), non-finite numbers, and cycles throw SerializationError with a path.
 
 OBSERVE: .durably/runs/<id>/state.json + events.log. state.json, inspect(), testEngine
 results, and errors surface advisories[]/hints; run() uses stderr/onAdvisory/errors.
@@ -472,6 +498,8 @@ RESOURCES
 
 ENGINES + STORAGE
   createEngine({storage?,resources?,concurrency?,budget?,hooks?})
+  concurrency caps concurrent RUNS and defaults to 4 — raise it for child fan-out.
+  ctx.parallel defaults to running every thunk at once; pass {concurrency} to cap.
   FileStorage(dir); MemoryStorage(); SqliteStorage(path) from @nikhilverma/durably/sqlite.
   StorageAdapter has init,createRun,append,read,claim,heartbeat,list; append must be
   atomic and ordered per run.
@@ -569,7 +597,8 @@ These are the tradeoffs that matter in practice:
 4. **`run()` failed→resume retries permanent failures.** A bad input hits the same wall each invocation until `{ fresh: true }`. The failing step and error are in `state.json`.
 5. **Plain-file durability has limits.** Checksummed records + torn-tail truncation + lockfiles make `FileStorage` solid on local disks and acceptable on Windows. Use `SqliteStorage` on network filesystems or when you want transactional claims.
 6. **`loop` state must be serializable and reasonably small.** Snapshots are the resume path; a 50 MB messages array snapshotted every turn is your I/O bill. Compact your own history (you control the reducer) or raise `snapshotEvery`.
-7. **Fan-out has a ceiling — know where durably taps out.** In-run `parallel` is comfortable to ~10⁴ steps. Child runs: ~10³–10⁴ on `FileStorage` (directory entries, fd churn, `list()` scans become the limit before the model does), ~10⁵ on `SqliteStorage`. Past ~10⁵ items, reach for your provider's Batch API — and that's a recipe, not a defeat: submit the batch as one step, poll with `sleep` + a step in a loop, and durably babysits the batch job instead of impersonating one.
+7. **The durable boundary is JSON plus `Date`, with JSON's `undefined` rules.** An undefined property is dropped and an undefined array element becomes `null`, exactly as `JSON.stringify` would — an optional field written `field?: T` must not fail a run before it starts. Everything JSON genuinely cannot express (`bigint`, `symbol`, functions, class instances, `NaN`/`Infinity`, cycles) still throws `SerializationError` with the offending path, at the boundary rather than six hours into a resume.
+8. **Fan-out has a ceiling — know where durably taps out.** In-run `parallel` is comfortable to ~10⁴ steps. Child runs: ~10³–10⁴ on `FileStorage` (directory entries, fd churn, `list()` scans become the limit before the model does), ~10⁵ on `SqliteStorage`. Past ~10⁵ items, reach for your provider's Batch API — and that's a recipe, not a defeat: submit the batch as one step, poll with `sleep` + a step in a loop, and durably babysits the batch job instead of impersonating one. The same shape works below the ceiling: batch the units of work into a few hundred durable steps and keep per-unit idempotency in your own ledger (a SQLite table, a key-value file) inside each step. durably owns the coarse checkpoints; you own the fine ones.
 
 ---
 

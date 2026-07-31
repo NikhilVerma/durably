@@ -2,6 +2,30 @@
 
 Append-only governance notes for choices that affect the public contract.
 
+## 2026-07-31 — The durable boundary is JSON's boundary, and progress is observable
+
+Two field-driven contract changes, both from one build that ran durably for real.
+
+`undefined` now behaves at the durable boundary exactly as `JSON.stringify` makes
+it behave: an undefined property is dropped from its object, an undefined array
+element becomes `null`. The earlier rule — reject an undefined property rather
+than silently drop the key — was defensible in isolation and wrong in context.
+The serializer's contract is "JSON plus `Date`", and every other JSON path in the
+language treats an absent optional field and an explicitly-undefined one as the
+same value. Rejecting them made the ordinary `field?: T` idiom a startup crash.
+Refusing values JSON cannot express at all is unchanged: that refusal is what
+keeps a resume from reading back a different value than the live run produced.
+
+`onStep` resolves the observability channel `onStart` was deferred against, and
+does so without touching `run(): T`. Progress delivered as an event stream
+carries what a return value cannot: which steps replayed from the log rather than
+executed, and which are retrying rather than merely slow. Observation is not a
+control point — a listener that throws is swallowed, because a progress callback
+must not fail work the run already completed. `KeyConflictError` naming the bound
+run and both inputs follows the same principle the error registry already states:
+an error is documentation, and one that cannot be acted on from its own message
+is not finished.
+
 ## 2026-07-25 — Durable records are immutable, and the lease owner writes state
 
 Four contract points follow from one rule: what is recorded describes the world,
