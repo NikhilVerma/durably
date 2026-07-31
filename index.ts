@@ -301,7 +301,24 @@ export interface WorkflowFactory {
   ): Workflow<Input, WorkflowResult<Awaited<Output>>>;
 }
 
-export interface RunOptions {
+export type StepEventStatus = "running" | "replayed" | "ok" | "retrying" | "failed";
+
+export interface StepEvent {
+  readonly runId: string;
+  readonly path: readonly number[];
+  readonly label: string;
+  readonly status: StepEventStatus;
+  readonly attempt: number;
+  readonly executions: number;
+  readonly ms?: number;
+  readonly error?: unknown;
+}
+
+export interface StepObserverOptions {
+  readonly onStep?: (event: StepEvent) => void;
+}
+
+export interface RunOptions extends StepObserverOptions {
   readonly key?: string;
   readonly fresh?: boolean;
   readonly budget?: Budget;
@@ -337,6 +354,7 @@ export interface RunState {
   readonly runId: string;
   readonly status: RunStatus;
   readonly workflow: string;
+  readonly key?: string;
   readonly children: string[];
   readonly advisories: Advisory[];
   readonly annotations?: Readonly<Record<string, JsonValue>>;
@@ -422,6 +440,7 @@ export interface EnqueueOptions {
 export interface ListOptions {
   readonly status?: RunStatus;
   readonly workflow?: string;
+  readonly key?: string;
   readonly limit?: number;
 }
 
@@ -486,7 +505,7 @@ export interface TestRunResult<Output = unknown> {
   readonly children: RunHandle<unknown>[];
 }
 
-export interface TestRunOptions {
+export interface TestRunOptions extends StepObserverOptions {
   readonly crashAfter?: Selector;
   readonly crashInStep?: Selector;
   readonly budget?: Budget;
@@ -505,7 +524,7 @@ export interface TestEngine {
     input: Input,
     options?: TestRunOptions,
   ): Promise<TestRunResult<Output>>;
-  resume(runId: string): Promise<TestRunResult<unknown>>;
+  resume(runId: string, options?: StepObserverOptions): Promise<TestRunResult<unknown>>;
   signal(runId: string, name: string, payload: unknown): Promise<void>;
 }
 

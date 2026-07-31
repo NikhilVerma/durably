@@ -51,8 +51,8 @@ export const errorRegistry = {
   ),
   KeyConflictError: entry(
     "keys",
-    "Use the same input for this key or choose fresh",
-    { exports: ["KeyConflictError"], context: [], engine: [] },
+    "Reuse the bound input, pass fresh, or inspect the run named in this error",
+    { exports: ["KeyConflictError"], context: [], engine: ["inspect"] },
   ),
   RunCancelledError: entry(
     "cancellation",

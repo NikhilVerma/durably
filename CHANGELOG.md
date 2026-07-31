@@ -7,6 +7,46 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-31
+
+Field feedback from a 449-batch, 448k-image harvest built on 0.3.0. Every change
+here removes something that cost that build time.
+
+### Added
+
+- `onStep` on `RunOptions` and `TestRunOptions`: a progress channel symmetric
+  with `onAdvisory`, delivering `{ runId, path, label, status, attempt,
+  executions, ms?, error? }` where `status` is `running | replayed | ok |
+  retrying | failed`. `console.log` inside a workflow body re-prints on every
+  replay and cannot tell a replayed step from an executing one; a retrying step
+  was previously indistinguishable from a slow one. Observation never fails a
+  run: a listener that throws is swallowed. `testEngine().resume(runId, {
+  onStep })` takes the same callback and detaches it when that resume returns.
+- `list({ key })` and `key` on `RunState`, so the name an operator chose leads
+  back to a run id without globbing every `state.json`.
+
+### Changed
+
+- `undefined` now follows `JSON.stringify` at the durable boundary: an undefined
+  property is dropped from its object and an undefined array element becomes
+  `null`. `{ maxImages: undefined }` and `{}` are therefore the same input and
+  hash identically. The previous behaviour rejected the ordinary `field?: T`
+  idiom with a `SerializationError` before the run started, which is the one
+  place the serializer diverged from the JS mental model it otherwise matches.
+  Values JSON genuinely cannot express still throw with their path.
+- `KeyConflictError` names what conflicts: the message reports the bound run id
+  and both inputs, and the error carries `key`, `runId`, `boundInput`, and
+  `input`. Deciding whether the change was meaningful no longer requires
+  locating and reading `state.json`.
+
+### Documentation
+
+- The default concurrencies are stated where they bite: `ctx.parallel` runs
+  every thunk at once unless capped, while an engine runs 4 *runs* at a time —
+  the knob that actually throttles `spawnAll` fan-out.
+- The batching pattern for work above the fan-out ceiling is written down:
+  coarse durable steps plus your own per-item ledger inside each step.
+
 ## [0.3.0] - 2026-07-25
 
 ### Fixed

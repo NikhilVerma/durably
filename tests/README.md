@@ -6,7 +6,7 @@ This is the executable contract built before the library. No test is skipped or 
 
 | Area | Contract exercised |
 | --- | --- |
-| `types/public-api.contract.ts` | overload inference, schema inference, `run(): T`, loop `done`, heterogeneous children, `Result` narrowing, selectors, engines/storage/resources, advisory callback |
+| `types/public-api.contract.ts` | overload inference, schema inference, `run(): T`, loop `done`, heterogeneous children, `Result` narrowing, selectors, engines/storage/resources, advisory and step callbacks |
 | `unit/m1-kernel.test.ts` | positional steps, replay memoization, purity, serialization, replay-safe values/logging |
 | `unit/m2-test-engine.test.ts` | failure injection, selectors, shadow replay, fake time, signal/wait |
 | `unit/m3-policies.test.ts` | retry/backoff, timeout/abort, schema validation, saga rollback, keyed concurrency, budgets |
@@ -21,6 +21,7 @@ This is the executable contract built before the library. No test is skipped or 
 | `unit/m8-ship-gates.test.ts` | CORE/EXTENDED tokenizer budgets and agent-facing registry |
 | `unit/m8-node-portability.test.ts` | package exports, ESM/CJS Node smoke, SQLite isolation, no Bun production imports |
 | `unit/m8-registry-contract.test.ts` | actual advisory/error registries, docs routes, implemented API-reference manifest |
+| `unit/m9-operator-ergonomics.test.ts` | JSON `undefined` semantics at the durable boundary, self-describing key conflicts, key lookup, `onStep` progress |
 | `integration/hero-workflow.test.ts` | README fan-out/fan-in story, flaky children, crash/resume, saga recovery |
 | `integration/readme-hero-process.test.ts` | literal file-backed hero command killed and rerun across real processes |
 | `integration/file-engine-cooperation.test.ts` | state/advisory parity, two-engine subscribe, two-process kill/reclaim, lease heartbeat and stale-owner protection, key conflicts |

@@ -26,8 +26,15 @@ const wf = workflow({ input: Schema, output?, name? }, fn)   // Standard Schema 
 await run(wf, input, options?) -> Output    // the workflow's value, always; never a wrapper
 ```
 
-`RunOptions`: `{ key?, fresh?, budget?, dir?, advisories?: 'silent', onAdvisory?: (a) => void }`.
-Default storage directory is `./.durably`.
+`RunOptions`: `{ key?, fresh?, budget?, dir?, advisories?: 'silent', onAdvisory?: (a) => void,
+onStep?: (e: StepEvent) => void }`. Default storage directory is `./.durably`.
+
+`StepEvent` = `{ runId, path, label, status, attempt, executions, ms?, error? }`, where `status` is
+`running | replayed | ok | retrying | failed`. It is the progress channel for a long run:
+`console.log` inside the workflow body re-prints on replay, and `replayed` vs `running` is exactly
+the distinction that re-printing loses. Observers cannot fail a run — a listener that throws is
+swallowed. `testEngine().run(wf, input, { onStep })` and `te.resume(runId, { onStep })` take the
+same callback; a resume observer is detached when that resume returns.
 
 Candidate identity is `(workflow family, canonicalInputHash)`, or `(workflow family, key)` when
 a key is given. Input canonicalization is well defined because inputs are plain JSON. The body
@@ -57,7 +64,7 @@ ctx.step(fn, options?) -> Promise<T>
   options: { name?, retry?, timeoutMs?, schema?, compensate?, concurrencyKey?,
              concurrencyLimit? = 1, uses? }
 
-ctx.parallel(thunks, { concurrency? }?) -> Promise<Result<T>[]>
+ctx.parallel(thunks, { concurrency? }?) -> Promise<Result<T>[]>   // default: every thunk at once
 ctx.spawn(wf, input, { detached? }?) -> Promise<RunHandle<T>>
 ctx.spawnAll([[wf, input], …], { detached? }?) -> Promise<RunHandle[]>
 ctx.joinAll(handles) -> Promise<Result<T>[]>
@@ -89,12 +96,16 @@ Cancelling a parent cancels its children unless they were spawned `{ detached: t
 Workflow inputs, step outputs, loop state, stash values, annotations, and the workflow result
 are deep-cloned by a strict serializer. `SerializationError` carries the offending `path`.
 
-Allowed: `null`, strings, booleans, finite numbers, valid `Date`, plain arrays (holes normalized
-to `null`), plain objects whose prototype is `Object.prototype`.
+Allowed: `null`, strings, booleans, finite numbers, valid `Date`, plain arrays, plain objects whose
+prototype is `Object.prototype`.
 
-Rejected: `Infinity` / `NaN`, `undefined` as a property value (a top-level `undefined` step
-result is fine), `bigint`, `symbol`, functions, any class instance (`Map`, `Set`, `URL`, `Error`,
-your own classes), and cyclic references.
+Normalized exactly as `JSON.stringify` would: an `undefined` property is dropped from its object,
+and an array hole or `undefined` element becomes `null`. So `{ maxImages: undefined }` and `{}` are
+the same input, hash identically, and join the same run — `field?: T` is safe to pass straight to
+`run()`. A top-level `undefined` step result stays `undefined`.
+
+Rejected: `Infinity` / `NaN`, `bigint`, `symbol`, functions, any class instance (`Map`, `Set`,
+`URL`, `Error`, your own classes), and cyclic references.
 
 Thrown errors are a separate path: a recorded error keeps its class and reported name across
 process boundaries. Returning an `Error` as a *value* is a class instance and is rejected.
@@ -124,7 +135,7 @@ import { durably } from '@nikhilverma/durably'      // lazy, ./.durably
 
 durably.enqueue(wf, input, { key?, priority?, delayMs?, budget? }) -> RunHandle
 durably.inspect(runId) -> RunState | null
-durably.list({ status?, workflow?, limit? }) -> RunState[]
+durably.list({ status?, workflow?, key?, limit? }) -> RunState[]   // key -> runId -> run directory
 durably.retry(runId, { fromStep? })       // failed run: completed steps stay done
 durably.restart(runId) -> RunHandle       // stale run: fresh start under new code
 durably.adopt(runId)                      // stale run: you assert replay compatibility
@@ -152,7 +163,7 @@ const openai = resource('openai', {
 const engine = createEngine({
   storage: new FileStorage('~/.myagent/durably'),
   resources: [openai],
-  concurrency: 8,
+  concurrency: 8,           // concurrent RUNS, default 4 — this is what throttles child fan-out
   budget: { usd: 200 },        // fleet-wide; run budgets draw from it
   hooks: { onRunFailed: ({ runId, error }) => notify(error) },
   leaseMs, heartbeatMs,
@@ -194,7 +205,7 @@ the run's active warnings, which makes them most diagnostic exactly when the run
 | `StaleRunError` | the workflow body changed incompatibly — `restart` or `adopt` |
 | `BudgetExceededError` | a charge or step would cross a run or engine cap |
 | `CircuitOpenError` | a resource breaker is open (retryable) |
-| `KeyConflictError` | a `key` collides with an incompatible run |
+| `KeyConflictError` | a `key` collides with an incompatible run — carries `key`, `runId`, `boundInput`, `input` |
 | `RunCancelledError` | the run or its parent was cancelled |
 | `LeaseLostError` | another engine reclaimed the run mid-attempt |
 
@@ -249,6 +260,8 @@ new executions. Crash selectors accept the same selector forms as step operation
    every turn is your I/O bill; compact it in your reducer or raise `snapshotEvery`.
 4. In-run `parallel` is comfortable to ~10⁴ steps. Child runs: ~10³–10⁴ on `FileStorage`,
    ~10⁵ on `SqliteStorage`. Past ~10⁵ items, submit your provider's Batch API as one step and
-   poll it with `sleep` inside a loop.
+   poll it with `sleep` inside a loop. Below that ceiling the same shape applies: batch the work
+   into a few hundred durable steps and keep per-item idempotency in your own ledger inside each
+   step. durably owns the coarse checkpoints, you own the fine ones.
 5. No distributed execution, no job queue, no persistent cron, no dashboards, no workflow
    versioning APIs. These are refusals, not roadmap gaps.
