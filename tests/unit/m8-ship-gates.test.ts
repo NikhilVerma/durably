@@ -65,6 +65,7 @@ describe("M8 README and agent-context release gates", () => {
       "WAITFOR_NO_TIMEOUT",
       "SNAPSHOT_HEAVY",
       "SLOW_STEP_NO_TIMEOUT",
+      "CONCURRENCY_CAPPED",
     ];
 
     for (const code of codes) expect(extended).toContain(code);
@@ -173,6 +174,7 @@ describe("M8 README and agent-context release gates", () => {
       WAITFOR_NO_TIMEOUT: "wait-for",
       SNAPSHOT_HEAVY: "loop#snapshot-size",
       SLOW_STEP_NO_TIMEOUT: "timeouts",
+      CONCURRENCY_CAPPED: "fanout",
     };
     const readmeProof: Record<string, RegExp> = {
       loop: /ctx\.loop/,

@@ -108,7 +108,8 @@ Failures are values, never swallowed — handle them, or use the exported `isOk`
 Never pass that array on as if it were `T[]`.
 
 `ctx.parallel` runs every thunk at once unless given `{ concurrency }`; an engine runs 4 *runs*
-at a time unless given `createEngine({ concurrency })`, and that is what throttles `spawnAll`.
+at a time unless given `createEngine({ concurrency })`, and that is what throttles `spawnAll`
+(a wider fan-out than the cap raises `CONCURRENCY_CAPPED` with both numbers).
 Past ~10⁴ items, batch them into a few hundred steps and keep per-item idempotency in your own
 ledger inside each step.
 
@@ -129,6 +130,11 @@ await ctx.step(({ signal }) => call({ signal }), {
   uses: 'openai',                      // shared rate limit + circuit breaker
 })
 ```
+
+When steps cost money, pass `checkpointEvery: 1`. A checkpoint rewrites the whole run state, so
+the default scales with run length — every step up to 100, then every one percent of them — and a
+crash re-executes whatever the last checkpoint missed. A step is also the unit of durability: one
+killed at 99% yields nothing and re-runs whole, so use `stash` for progress inside a long step.
 
 Retries are **off by default** — a failing step fails the run. Add them where the failure is
 plausibly transient. Validate with `schema` where an LLM produced the value; recorded outputs

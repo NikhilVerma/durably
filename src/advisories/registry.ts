@@ -62,6 +62,12 @@ export const advisoryRegistry = {
     "Compact loop state or increase snapshotEvery.",
     { exports: [], context: ["loop"], engine: [] },
   ),
+  CONCURRENCY_CAPPED: entry(
+    "fanout",
+    "A fan-out is wider than the number of runs this engine will execute at once.",
+    "Raise createEngine({ concurrency }) to run more children at a time.",
+    { exports: [], context: ["spawnAll"], engine: [] },
+  ),
   SLOW_STEP_NO_TIMEOUT: entry(
     "timeouts",
     "A step attempt exceeded 30 seconds without a timeout policy.",

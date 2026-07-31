@@ -50,7 +50,8 @@ export type AdvisoryCode =
   | "BUDGET_NEAR"
   | "WAITFOR_NO_TIMEOUT"
   | "SNAPSHOT_HEAVY"
-  | "SLOW_STEP_NO_TIMEOUT";
+  | "SLOW_STEP_NO_TIMEOUT"
+  | "CONCURRENCY_CAPPED";
 
 export interface Advisory {
   readonly code: AdvisoryCode;
@@ -323,6 +324,7 @@ export interface RunOptions extends StepObserverOptions {
   readonly fresh?: boolean;
   readonly budget?: Budget;
   readonly dir?: string;
+  readonly checkpointEvery?: number;
   readonly advisories?: AdvisoryMode;
   readonly onAdvisory?: (advisory: Advisory) => void;
 }
@@ -424,6 +426,7 @@ export interface EngineOptions {
   readonly storage?: StorageAdapter;
   readonly resources?: readonly Resource[];
   readonly concurrency?: number;
+  readonly checkpointEvery?: number;
   readonly budget?: Budget;
   readonly hooks?: EngineHooks;
   readonly leaseMs?: number;
@@ -435,6 +438,7 @@ export interface EnqueueOptions {
   readonly priority?: number;
   readonly delayMs?: number;
   readonly budget?: Budget;
+  readonly checkpointEvery?: number;
 }
 
 export interface ListOptions {

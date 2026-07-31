@@ -20,6 +20,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -509,8 +510,43 @@ export class MemoryStorage implements StorageAdapter {
 
 export class FileStorage implements StorageAdapter {
   readonly directory: string;
-  constructor(directory: string) {
+  /**
+   * Every state record embeds the whole run, so an uncompacted log grows with
+   * the square of the step count: a 200-step run wrote roughly nine megabytes
+   * of repeated states. Past this many bytes the log is rewritten to hold only
+   * the newest state record, which is all a resume reads. Only the lease owner
+   * appends state records, so the rewrite races nothing that could commit.
+   */
+  readonly compactAboveBytes: number;
+  readonly #logBytes = new Map<string, number>();
+  constructor(directory: string, options: { compactAboveBytes?: number } = {}) {
     this.directory = directory;
+    this.compactAboveBytes = options.compactAboveBytes ?? 1_000_000;
+  }
+
+  #trackedBytes(runId: string, path: string): number {
+    const known = this.#logBytes.get(runId);
+    if (known !== undefined) return known;
+    let size = 0;
+    try {
+      size = statSync(path).size;
+    } catch {}
+    this.#logBytes.set(runId, size);
+    return size;
+  }
+
+  #shouldCompact(runId: string, path: string, frame: Buffer, event: unknown): boolean {
+    const size = this.#trackedBytes(runId, path) + frame.byteLength;
+    this.#logBytes.set(runId, size);
+    const isStateRecord = Boolean((event as { state?: unknown }).state);
+    return isStateRecord && size > this.compactAboveBytes;
+  }
+
+  #compactSync(runId: string, path: string, frame: Buffer): void {
+    const temporary = `${path}.compact-${process.pid}-${Math.random().toString(16).slice(2)}`;
+    writeFileSync(temporary, frame);
+    renameSync(temporary, path);
+    this.#logBytes.set(runId, frame.byteLength);
   }
   private runDirectory(runId: string): string {
     return join(this.directory, "runs", runId.slice(0, 2), runId);
@@ -561,7 +597,13 @@ export class FileStorage implements StorageAdapter {
   }
   appendSync(runId: string, event: unknown): void {
     mkdirSync(this.runDirectory(runId), { recursive: true });
-    appendFileSync(this.eventsPath(runId), frame(event));
+    const record = frame(event);
+    const eventsPath = this.eventsPath(runId);
+    if (this.#shouldCompact(runId, eventsPath, record, event)) {
+      this.#compactSync(runId, eventsPath, record);
+    } else {
+      appendFileSync(eventsPath, record);
+    }
     const state = (event as { state?: RunState }).state;
     if (state) {
       const target = this.statePath(runId);
@@ -627,7 +669,16 @@ export class FileStorage implements StorageAdapter {
   }
   async append(runId: string, event: unknown): Promise<void> {
     await mkdir(this.runDirectory(runId), { recursive: true });
-    await appendFile(this.eventsPath(runId), frame(event));
+    const record = frame(event);
+    const eventsPath = this.eventsPath(runId);
+    if (this.#shouldCompact(runId, eventsPath, record, event)) {
+      const temporary = `${eventsPath}.compact-${process.pid}-${Math.random().toString(16).slice(2)}`;
+      await writeFile(temporary, record);
+      await rename(temporary, eventsPath);
+      // the newest state record is the whole log now
+    } else {
+      await appendFile(eventsPath, record);
+    }
     const state = (event as { state?: RunState }).state;
     if (state) {
       const target = this.statePath(runId);
@@ -839,6 +890,7 @@ interface InternalRun {
   stderrCodes: Set<string>;
   advisoriesSilent: boolean;
   fastStart: boolean;
+  checkpointEvery?: number | undefined;
 }
 
 interface PathFrame {
@@ -1133,6 +1185,7 @@ class EngineImpl implements Engine {
   readonly keyedSemaphores = new Map<string, Semaphore>();
   readonly resourceRuntimes = new Map<string, ResourceRuntime>();
   readonly concurrency: number;
+  readonly checkpointEvery: number | undefined;
   readonly leaseMs: number;
   readonly heartbeatMs: number;
   readonly engineBudget: Budget;
@@ -1150,6 +1203,7 @@ class EngineImpl implements Engine {
     this.storage = (options.storage ?? new MemoryStorage()) as RuntimeStorage;
     this.clock = options.clock ?? new RealClock();
     this.concurrency = options.concurrency ?? 4;
+    this.checkpointEvery = options.checkpointEvery;
     this.leaseMs = options.leaseMs ?? 2_000;
     // The heartbeat must always fit comfortably inside the lease, including for
     // short leases, or the owner loses a lease it is still working under.
@@ -1221,6 +1275,24 @@ class EngineImpl implements Engine {
   }
 
   /**
+   * A run blocked on its children is parked, not executing. Holding a
+   * concurrency slot while parked starves the children of the slots they need
+   * to finish; with as many parked parents as the cap, nothing can ever run
+   * again. Reclaiming is unconditional, so resuming never waits on a slot and
+   * the cap can be briefly exceeded by runs that were already in flight.
+   */
+  async awaitParked<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#active <= 0) return fn();
+    this.#active--;
+    this.kick();
+    try {
+      return await fn();
+    } finally {
+      this.#active++;
+    }
+  }
+
+  /**
    * Progress is an observation, never a control point: a listener that throws
    * must not fail work the run has already done.
    */
@@ -1259,6 +1331,7 @@ class EngineImpl implements Engine {
     run: InternalRun,
     code: keyof typeof advisoryRegistry,
     level: "info" | "warn" = "info",
+    detail?: string,
   ): void {
     if (run.advisoriesSilent) return;
     const definition = advisoryRegistry[code];
@@ -1266,7 +1339,7 @@ class EngineImpl implements Engine {
     accumulator.observe({
       code,
       level,
-      msg: definition.msg,
+      msg: detail ? `${definition.msg} ${detail}` : definition.msg,
       hint: definition.hint,
       docs: definition.docs,
       at: new Date(this.clock.now()).toISOString(),
@@ -1289,11 +1362,19 @@ class EngineImpl implements Engine {
       for (const listener of run.listeners) listener();
       return;
     }
+    // Every checkpoint rewrites the whole run state, so checkpointing each of
+    // ten thousand steps is quadratic I/O. Skipping checkpoints is not free
+    // either: whatever is not recorded re-executes after a crash. Scaling the
+    // interval with the step count keeps total checkpoint traffic linear while
+    // bounding the loss at one percent of the run — and callers whose steps
+    // cost money set checkpointEvery: 1 and pay the I/O deliberately.
+    const interval = run.checkpointEvery
+      ?? Math.min(100, Math.max(1, Math.ceil(run.steps.length / 100)));
     const completedSteps = run.steps.filter((step) => step.status === "ok").length;
     if (
       run.status === "running"
-      && run.steps.length > 200
-      && completedSteps % 100 !== 0
+      && interval > 1
+      && completedSteps % interval !== 0
     ) return;
     run.seq++;
     const event = {
@@ -1343,6 +1424,7 @@ class EngineImpl implements Engine {
       workflowAttempt: 0,
       rollbackPending: false,
       rollbackIndex: -1,
+      checkpointEvery: options.checkpointEvery ?? this.checkpointEvery,
       workflowDef: definition,
       signalSchemas: new Map(),
       activeControllers: new Set(),
@@ -2664,6 +2746,14 @@ class EngineImpl implements Engine {
             engine.observe(run, "FANOUT_CEILING", "info");
           }
           if (count >= 5_000) engine.observe(run, "FANOUT_CEILING", "warn");
+          if (handles.length > engine.concurrency) {
+            engine.observe(
+              run,
+              "CONCURRENCY_CAPPED",
+              "info",
+              `Spawned ${handles.length} children; this engine runs ${engine.concurrency} at a time.`,
+            );
+          }
           await engine.persist(run);
         }
         return handles;
@@ -2676,7 +2766,9 @@ class EngineImpl implements Engine {
             results.push({ ok: false, error: errorValue(new Error(`child ${handle.runId} not found`)) });
             continue;
           }
-          if (!engine.isTerminal(child.status)) await engine.waitForSettled(child);
+          if (!engine.isTerminal(child.status)) {
+            await engine.awaitParked(() => engine.waitForSettled(child));
+          }
           if (child.status === "completed") results.push({ ok: true, value: child.result });
           else results.push({
             ok: false,
@@ -3100,6 +3192,7 @@ class EngineImpl implements Engine {
 
   private attachDirectOptions(run: InternalRun, options: RunOptions): void {
     run.advisoriesSilent = options.advisories === "silent";
+    if (options.checkpointEvery !== undefined) run.checkpointEvery = options.checkpointEvery;
     if (options.onAdvisory && !run.advisoriesSilent) {
       run.advisoryListeners.add(options.onAdvisory);
       for (const advisory of run.advisories) options.onAdvisory({ ...advisory });
@@ -3294,6 +3387,7 @@ class EngineImpl implements Engine {
     }
     const run = this.runs.get(handle.runId)!;
     run.advisoriesSilent = options.advisories === "silent";
+    if (options.checkpointEvery !== undefined) run.checkpointEvery = options.checkpointEvery;
     if (options.onAdvisory && !run.advisoriesSilent) {
       run.advisoryListeners.add(options.onAdvisory);
       for (const advisory of run.advisories) options.onAdvisory({ ...advisory });

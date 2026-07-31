@@ -2,6 +2,26 @@
 
 Append-only governance notes for choices that affect the public contract.
 
+## 2026-07-31 — Parked runs hold no slot, and checkpoint cost is a stated bound
+
+A run awaiting its children is parked, not executing, and must not count against
+the engine's concurrency cap. Counting it was not merely a throughput bug: with
+as many parked parents as the cap, no child could ever be scheduled and the
+engine deadlocked. Reclaiming the slot on resume is unconditional, so a resuming
+parent never waits behind the cap; the cap may be briefly exceeded by runs that
+were already in flight, which is the correct direction to err.
+
+Checkpoint frequency is a tradeoff between two real costs, and durably states
+where it sits rather than picking silently. A checkpoint rewrites the whole run
+state, so checkpointing every step of a long run is quadratic I/O; skipping one
+means the work it would have recorded re-executes after a crash, which
+contradicts the library's central promise. The default interval therefore scales
+with the run — every step up to a hundred, then one percent of the steps so far,
+capped at every hundredth — bounding crash loss at one percent of completed work,
+and `checkpointEvery` lets a caller whose steps cost money buy exactness. The
+event log is compacted to its newest state record past a size threshold, because
+a resume reads only that record; history beyond it is convenience, not contract.
+
 ## 2026-07-31 — The durable boundary is JSON's boundary, and progress is observable
 
 Two field-driven contract changes, both from one build that ran durably for real.
@@ -84,6 +104,7 @@ Each initial code names a concrete cliff and an implemented next move:
 | `WAITFOR_NO_TIMEOUT` | A parked run may wait forever | `waitFor(..., { timeoutMs })` | `https://www.npmjs.com/package/@nikhilverma/durably#docs-wait-for` |
 | `SNAPSHOT_HEAVY` | State size times snapshot frequency creates excessive I/O | Compact state or raise `snapshotEvery` | `https://www.npmjs.com/package/@nikhilverma/durably#snapshot-size` |
 | `SLOW_STEP_NO_TIMEOUT` | A slow attempt can hang indefinitely | Step `timeoutMs` with `AbortSignal` handling | `https://www.npmjs.com/package/@nikhilverma/durably#docs-timeouts` |
+| `CONCURRENCY_CAPPED` | A fan-out is wider than the engine will run at once | Raise `createEngine({ concurrency })` | `https://www.npmjs.com/package/@nikhilverma/durably#docs-fanout` |
 
 The active set is capped at ten, warning severity is reserved for stated quantitative ceilings, and stderr emits at most once per code and run.
 
